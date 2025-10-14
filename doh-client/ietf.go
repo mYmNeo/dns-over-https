@@ -168,14 +168,14 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	}
 }
 
-func (c *Client) parseResponseIETF(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, isTCP bool, req *DNSRequest) {
+func (c *Client) parseResponseIETF(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, isTCP bool, req *DNSRequest) *dns.Msg {
 	if req.response.StatusCode != http.StatusOK {
 		log.Printf("HTTP error from upstream %s: %s\n", req.currentUpstream, req.response.Status)
 		req.reply.Rcode = dns.RcodeServerFailure
 		contentType := req.response.Header.Get("Content-Type")
 		if contentType != "application/dns-message" && !strings.HasPrefix(contentType, "application/dns-message;") {
 			w.WriteMsg(req.reply)
-			return
+			return nil
 		}
 	}
 
@@ -184,7 +184,7 @@ func (c *Client) parseResponseIETF(ctx context.Context, w dns.ResponseWriter, r 
 		log.Printf("read error from upstream %s: %v\n", req.currentUpstream, err)
 		req.reply.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(req.reply)
-		return
+		return nil
 	}
 	headerNow := req.response.Header.Get("Date")
 	now := time.Now().UTC()
@@ -215,7 +215,7 @@ func (c *Client) parseResponseIETF(ctx context.Context, w dns.ResponseWriter, r 
 		log.Printf("unpacking error from upstream %s: %v\n", req.currentUpstream, err)
 		req.reply.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(req.reply)
-		return
+		return nil
 	}
 
 	fullReply.Id = r.Id
@@ -242,12 +242,13 @@ func (c *Client) parseResponseIETF(ctx context.Context, w dns.ResponseWriter, r 
 		log.Printf("packing error with upstream %s: %v\n", req.currentUpstream, err)
 		req.reply.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(req.reply)
-		return
+		return nil
 	}
 	_, err = w.Write(buf)
 	if err != nil {
 		log.Printf("failed to write to client: %v\n", err)
 	}
+	return fullReply
 }
 
 func fixRecordTTL(rr dns.RR, delta time.Duration) dns.RR {

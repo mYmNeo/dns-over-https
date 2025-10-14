@@ -49,6 +49,8 @@ type upstream struct {
 type others struct {
 	Bootstrap             []string `toml:"bootstrap"`
 	Passthrough           []string `toml:"passthrough"`
+	GFWList               []string `toml:"gfwlist"`
+	GFWListURL            []string `toml:"gfwlist_url"`
 	Timeout               uint     `toml:"timeout"`
 	Interface             string   `toml:"interface"`
 	NoCookies             bool     `toml:"no_cookies"`
@@ -58,6 +60,9 @@ type others struct {
 	Verbose               bool     `toml:"verbose"`
 	DebugHTTPHeaders      []string `toml:"debug_http_headers"`
 	TLSInsecureSkipVerify bool     `toml:"insecure_tls_skip_verify"`
+	LocalInterfaceName    string   `toml:"local_ifname"`
+	ProxyPort             int      `toml:"proxy_port"`
+	IPTablesPath          string   `toml:"iptables_path"`
 }
 
 type Config struct {

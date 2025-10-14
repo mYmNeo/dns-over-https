@@ -28,8 +28,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"runtime"
 	"strconv"
+	"syscall"
 
 	"github.com/m13253/dns-over-https/v2/doh-client/config"
 )
@@ -114,5 +116,14 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		for sig := range c {
+			log.Printf("Received signal: %v", sig)
+			client.cleanRules()
+			os.Exit(0)
+		}
+	}()
 	_ = client.Start()
 }
