@@ -130,14 +130,14 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 	}
 }
 
-func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, isTCP bool, req *DNSRequest) {
+func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, isTCP bool, req *DNSRequest) *dns.Msg {
 	if req.response.StatusCode != http.StatusOK {
 		log.Printf("HTTP error from upstream %s: %s\n", req.currentUpstream, req.response.Status)
 		req.reply.Rcode = dns.RcodeServerFailure
 		contentType := req.response.Header.Get("Content-Type")
 		if contentType != "application/json" && !strings.HasPrefix(contentType, "application/json;") {
 			w.WriteMsg(req.reply)
-			return
+			return nil
 		}
 	}
 
@@ -146,7 +146,7 @@ func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, 
 		log.Println(err)
 		req.reply.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(req.reply)
-		return
+		return nil
 	}
 
 	var respJSON jsondns.Response
@@ -155,7 +155,7 @@ func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, 
 		log.Println(err)
 		req.reply.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(req.reply)
-		return
+		return nil
 	}
 
 	if respJSON.Status != dns.RcodeSuccess && respJSON.Comment != "" {
@@ -174,9 +174,10 @@ func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, 
 		log.Println(err)
 		req.reply.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(req.reply)
-		return
+		return nil
 	}
 	w.Write(buf)
+	return fullReply
 }
 
 // Fix DNS response empty []RR.Name

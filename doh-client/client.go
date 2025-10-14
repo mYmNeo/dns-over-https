@@ -24,8 +24,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math/rand"
@@ -33,12 +35,17 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/OneYX/v2ray-core/tools/gfwlist"
+	"github.com/coreos/go-iptables/iptables"
 	"github.com/miekg/dns"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/idna"
 
@@ -61,7 +68,10 @@ type Client struct {
 	udpServers           []*dns.Server
 	tcpServers           []*dns.Server
 	passthrough          []string
+	gfwLock              sync.RWMutex
+	gfwList              *gfwlist.GFWList
 	bootstrap            []string
+	routerRules          RouterRules
 }
 
 type DNSRequest struct {
@@ -73,6 +83,10 @@ type DNSRequest struct {
 	udpSize           uint16
 	ednsClientNetmask uint8
 }
+
+const (
+	GFW_IPLIST = "gfw_iplist"
+)
 
 func NewClient(conf *config.Config) (c *Client, err error) {
 	c = &Client{
@@ -278,6 +292,24 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 		}
 	}
 
+	err = c.PrepareGFWListIPSet()
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare gfwlist: %s", err)
+	}
+
+	err = c.PrepareDNSRules()
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare dns rules: %s", err)
+	}
+
+	if c.conf.Other.GFWListURL != nil || c.conf.Other.GFWList != nil {
+		gfwList, err := gfwlist.NewGFWList(c.conf.Other.GFWListURL, c.conf.Other.GFWList)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gfwlist: %s", err)
+		}
+		c.gfwList = gfwList
+	}
+
 	return c, nil
 }
 
@@ -447,18 +479,7 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 		fmt.Printf("%s - - [%s] \"%s %s %s\"\n", w.RemoteAddr(), time.Now().Format("02/Jan/2006:15:04:05 -0700"), questionName, questionClass, questionType)
 	}
 
-	shouldPassthrough := false
-	passthroughQuestionName := questionName
-	if punycode, err := idna.ToASCII(passthroughQuestionName); err != nil {
-		passthroughQuestionName = punycode
-	}
-	passthroughQuestionName = "." + strings.ToLower(strings.Trim(passthroughQuestionName, ".")) + "."
-	for _, passthrough := range c.passthrough {
-		if strings.HasSuffix(passthroughQuestionName, passthrough) {
-			shouldPassthrough = true
-			break
-		}
-	}
+	shouldPassthrough := !c.isGFWBlocked(questionName)
 	if shouldPassthrough {
 		numServers := len(c.bootstrap)
 		upstream := c.bootstrap[rand.Intn(numServers)]
@@ -522,24 +543,30 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 
 	candidateType := strings.SplitN(req.response.Header.Get("Content-Type"), ";", 2)[0]
 
+	var fullReply *dns.Msg
 	switch candidateType {
 	case "application/json":
-		c.parseResponseGoogle(ctx, w, r, isTCP, req)
+		fullReply = c.parseResponseGoogle(ctx, w, r, isTCP, req)
 
 	case "application/dns-message", "application/dns-udpwireformat":
-		c.parseResponseIETF(ctx, w, r, isTCP, req)
+		fullReply = c.parseResponseIETF(ctx, w, r, isTCP, req)
 
 	default:
 		switch requestType {
 		case "application/dns-json":
-			c.parseResponseGoogle(ctx, w, r, isTCP, req)
+			fullReply = c.parseResponseGoogle(ctx, w, r, isTCP, req)
 
 		case "application/dns-message":
-			c.parseResponseIETF(ctx, w, r, isTCP, req)
+			fullReply = c.parseResponseIETF(ctx, w, r, isTCP, req)
 
 		default:
 			panic("Unknown response Content-Type")
 		}
+	}
+
+	if c.isGFWBlocked(questionName) && fullReply != nil {
+		log.Println("GFW blocked:", questionName)
+		c.AddGFWFilterIP(fullReply.Answer)
 	}
 
 	// https://developers.cloudflare.com/1.1.1.1/dns-over-https/request-structure/ says
@@ -635,4 +662,218 @@ func (c *Client) getInterfaceIPs() (v4, v6 net.IP, err error) {
 		return nil, nil, fmt.Errorf("no valid IP addresses found on interface %s", c.conf.Other.Interface)
 	}
 	return v4, v6, nil
+}
+
+func (c *Client) isGFWBlocked(domain string) bool {
+	c.gfwLock.RLock()
+	defer c.gfwLock.RUnlock()
+
+	return c.gfwList != nil && c.gfwList.IsBlockedByGFW(strings.TrimSuffix(domain, "."))
+}
+
+func (c *Client) AddGFWFilterIP(answers []dns.RR) {
+	for _, ans := range answers {
+		// Extract IP address from DNS answer record
+		switch rr := ans.(type) {
+		case *dns.A:
+			// Handle IPv4 address
+			ip := rr.A.String()
+			log.Println("Adding IPv4 to GFW filter", "ip", ip)
+			_, err := exec.Command("ipset", "add", GFW_IPLIST, ip, "-exist").CombinedOutput()
+			if err != nil {
+				log.Println("Failed to add IP to ipset", "ip", ip, "error", err)
+			}
+		}
+	}
+}
+
+type RouterRules struct {
+	ipt *iptables.IPTables
+	// dns
+	dnsRule []string
+	// prerouting
+	preRoutingRule []string
+	// postrouting
+	postRoutingRule []string
+}
+
+func (c *Client) PrepareDNSRules() error {
+	ipt, err := iptables.New(iptables.Path(c.conf.Other.IPTablesPath), iptables.IPFamily(iptables.ProtocolIPv4))
+	if err != nil {
+		return fmt.Errorf("failed to create gfwlist iptables: %s", err)
+	}
+
+	localCIDR, err := GetRouteTable(c.conf.Other.LocalInterfaceName)
+	if err != nil {
+		return fmt.Errorf("failed to get local CIDR: %s", err)
+	}
+
+	localIP, err := GetIPFromInterface(c.conf.Other.LocalInterfaceName)
+	if err != nil {
+		return fmt.Errorf("failed to get local IP: %s", err)
+	}
+
+	_, port, err := net.SplitHostPort(c.conf.Listen[0])
+	if err != nil {
+		return fmt.Errorf("failed to split host port: %s", err)
+	}
+
+	dnsRule := []string{
+		"-s", localCIDR,
+		"-p", "udp",
+		"--dport", "53",
+		"-j", "DNAT",
+		"--to-destination", net.JoinHostPort(localIP, port),
+	}
+	err = ipt.AppendUnique("nat", "PREROUTING", dnsRule...)
+	if err != nil {
+		return fmt.Errorf("failed to create dns iptables: %s", err)
+	}
+	c.routerRules.dnsRule = dnsRule
+	if c.routerRules.ipt == nil {
+		c.routerRules.ipt = ipt
+	}
+
+	return nil
+}
+
+func (c *Client) PrepareGFWListIPSet() error {
+	out, err := exec.Command("ipset", "create", GFW_IPLIST, "hash:ip", "-exist").CombinedOutput()
+	if err != nil {
+		log.Println("Create ipset", "ipset", GFW_IPLIST, "output", string(out))
+		return err
+	}
+
+	localCIDR, err := GetRouteTable(c.conf.Other.LocalInterfaceName)
+	if err != nil {
+		return fmt.Errorf("failed to get local CIDR: %s", err)
+	}
+
+	localIP, err := GetIPFromInterface(c.conf.Other.LocalInterfaceName)
+	if err != nil {
+		return fmt.Errorf("failed to get local IP: %s", err)
+	}
+
+	gfwlistRule := []string{
+		"-s", localCIDR,
+		"-p", "tcp",
+		"-m", "set",
+		"--match-set", GFW_IPLIST,
+		"dst",
+		"-j", "DNAT",
+		"--to-destination", net.JoinHostPort(localIP, strconv.Itoa(c.conf.Other.ProxyPort)),
+	}
+
+	ipt, err := iptables.New(iptables.Path(c.conf.Other.IPTablesPath), iptables.IPFamily(iptables.ProtocolIPv4))
+	if err != nil {
+		return fmt.Errorf("failed to create gfwlist iptables: %s", err)
+	}
+	if c.routerRules.ipt == nil {
+		c.routerRules.ipt = ipt
+	}
+
+	err = ipt.AppendUnique("nat", "PREROUTING", gfwlistRule...)
+	if err != nil {
+		return fmt.Errorf("failed to create gfwlist iptables: %s", err)
+	}
+	c.routerRules.preRoutingRule = gfwlistRule
+
+	postRoutingRule := []string{
+		"-s", localCIDR,
+		"-j", "MASQUERADE",
+	}
+	err = ipt.AppendUnique("nat", "POSTROUTING", postRoutingRule...)
+	if err != nil {
+		return fmt.Errorf("failed to create gfwlist iptables: %s", err)
+	}
+	c.routerRules.postRoutingRule = postRoutingRule
+
+	return nil
+}
+
+func GetIPFromInterface(iferName string) (string, error) {
+	nlHandle, err := netlink.NewHandle()
+	if err != nil {
+		return "", fmt.Errorf("failed to create netlink handle: %s", err)
+	}
+	defer nlHandle.Close()
+
+	link, err := nlHandle.LinkByName(iferName)
+	if err != nil {
+		return "", fmt.Errorf("failed to get link by name: %s", err)
+	}
+
+	addrs, err := nlHandle.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return "", fmt.Errorf("failed to get address list: %s", err)
+	}
+
+	for _, addr := range addrs {
+		if !addr.IP.IsLoopback() {
+			if ipv4 := addr.IP.To4(); ipv4 != nil {
+				return ipv4.String(), nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("interface not found: %s", iferName)
+}
+
+func GetRouteTable(ifName string) (string, error) {
+	// Get system routing rules
+	routeFile, err := os.Open("/proc/net/route")
+	if err != nil {
+		return "", fmt.Errorf("failed to open route file: %v", err)
+	}
+	defer routeFile.Close()
+
+	scanner := bufio.NewScanner(routeFile)
+	// Skip header line
+	scanner.Scan()
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := strings.Fields(line)
+		if len(fields) >= 3 {
+			iface := fields[0]
+			destHex := fields[1]
+			maskHex := fields[7]
+
+			if iface != ifName {
+				continue
+			}
+
+			// Convert hex to IP address
+			dest, _ := hex.DecodeString(destHex)
+			mask, _ := hex.DecodeString(maskHex)
+			cidr := net.IPNet{
+				IP:   net.IPv4(dest[3], dest[2], dest[1], dest[0]),
+				Mask: net.IPv4Mask(mask[3], mask[2], mask[1], mask[0]),
+			}
+
+			return cidr.String(), nil
+		}
+	}
+
+	return "", nil
+}
+
+func (c *Client) cleanRules() {
+	log.Println("Cleaning router rules")
+	if c.routerRules.ipt != nil {
+		if len(c.routerRules.dnsRule) > 0 {
+			c.routerRules.ipt.DeleteIfExists("nat", "PREROUTING", c.routerRules.dnsRule...)
+		}
+
+		if len(c.routerRules.preRoutingRule) > 0 {
+			c.routerRules.ipt.DeleteIfExists("nat", "PREROUTING", c.routerRules.preRoutingRule...)
+		}
+
+		if len(c.routerRules.postRoutingRule) > 0 {
+			c.routerRules.ipt.DeleteIfExists("nat", "POSTROUTING", c.routerRules.postRoutingRule...)
+		}
+	}
+
+	exec.Command("ipset", "flush", GFW_IPLIST).CombinedOutput()
+	exec.Command("ipset", "destroy", GFW_IPLIST).CombinedOutput()
 }
