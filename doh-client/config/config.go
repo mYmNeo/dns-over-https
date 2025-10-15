@@ -60,6 +60,10 @@ type others struct {
 	Verbose               bool     `toml:"verbose"`
 	DebugHTTPHeaders      []string `toml:"debug_http_headers"`
 	TLSInsecureSkipVerify bool     `toml:"insecure_tls_skip_verify"`
+	TLSClientAuthCA       string   `toml:"tls_client_auth_ca"`
+	Cert                  string   `toml:"cert"`
+	Key                   string   `toml:"key"`
+	TLSClientAuth         bool     `toml:"tls_client_auth"`
 	LocalInterfaceName    string   `toml:"local_ifname"`
 	ProxyPort             int      `toml:"proxy_port"`
 	IPTablesPath          string   `toml:"iptables_path"`
