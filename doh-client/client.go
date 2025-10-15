@@ -27,6 +27,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -335,6 +336,23 @@ func (c *Client) newHTTPClient() error {
 		Resolver:  c.bootstrapResolver,
 	}
 
+	tlsConfig := &tls.Config{InsecureSkipVerify: c.conf.Other.TLSInsecureSkipVerify}
+	if c.conf.Other.TLSClientAuth {
+		cert, err := tls.LoadX509KeyPair(c.conf.Other.Cert, c.conf.Other.Key)
+		if err != nil {
+			return fmt.Errorf("failed to load certificate: %s", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+
+		clientCA, err := os.ReadFile(c.conf.Other.TLSClientAuthCA)
+		if err != nil {
+			log.Fatalf("Reading certificate for client authentication has failed: %v", err)
+		}
+		clientCAPool := x509.NewCertPool()
+		clientCAPool.AppendCertsFromPEM(clientCA)
+		tlsConfig.RootCAs = clientCAPool
+	}
+
 	c.httpTransport = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if c.conf.Other.Interface == "" {
@@ -394,7 +412,7 @@ func (c *Client) newHTTPClient() error {
 		MaxIdleConnsPerHost:   10,
 		Proxy:                 http.ProxyFromEnvironment,
 		TLSHandshakeTimeout:   time.Duration(c.conf.Other.Timeout) * time.Second,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: c.conf.Other.TLSInsecureSkipVerify},
+		TLSClientConfig:       tlsConfig,
 	}
 
 	if c.conf.Other.NoIPv6 {
