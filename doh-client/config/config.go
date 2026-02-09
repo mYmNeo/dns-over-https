@@ -51,6 +51,7 @@ type others struct {
 	Passthrough           []string `toml:"passthrough"`
 	GFWList               []string `toml:"gfwlist"`
 	GFWListURL            []string `toml:"gfwlist_url"`
+	BlockList             []string `toml:"blocklist"`
 	Timeout               uint     `toml:"timeout"`
 	Interface             string   `toml:"interface"`
 	NoCookies             bool     `toml:"no_cookies"`

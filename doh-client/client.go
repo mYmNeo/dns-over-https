@@ -71,6 +71,7 @@ type Client struct {
 	passthrough          []string
 	gfwLock              sync.RWMutex
 	gfwList              *gfwlist.GFWList
+	blockList            *gfwlist.GFWList
 	bootstrap            []string
 	routerRules          RouterRules
 }
@@ -311,6 +312,14 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 		c.gfwList = gfwList
 	}
 
+	if c.conf.Other.BlockList != nil {
+		blockList, err := gfwlist.NewGFWList(nil, c.conf.Other.BlockList)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create blocklist: %s", err)
+		}
+		c.blockList = blockList
+	}
+
 	return c, nil
 }
 
@@ -495,6 +504,14 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	}
 	if c.conf.Other.Verbose {
 		fmt.Printf("%s - - [%s] \"%s %s %s\"\n", w.RemoteAddr(), time.Now().Format("02/Jan/2006:15:04:05 -0700"), questionName, questionClass, questionType)
+	}
+
+	if c.isBlocked(questionName) {
+		log.Println("Blocked:", questionName)
+		reply := jsondns.PrepareReply(r)
+		reply.Rcode = dns.RcodeRefused
+		w.WriteMsg(reply)
+		return
 	}
 
 	shouldPassthrough := !c.isGFWBlocked(questionName)
@@ -687,6 +704,13 @@ func (c *Client) isGFWBlocked(domain string) bool {
 	defer c.gfwLock.RUnlock()
 
 	return c.gfwList != nil && c.gfwList.IsBlockedByGFW(strings.TrimSuffix(domain, "."))
+}
+
+func (c *Client) isBlocked(domain string) bool {
+	c.gfwLock.RLock()
+	defer c.gfwLock.RUnlock()
+
+	return c.blockList != nil && c.blockList.IsBlockedByGFW(strings.TrimSuffix(domain, "."))
 }
 
 func (c *Client) AddGFWFilterIP(answers []dns.RR) {
