@@ -26,11 +26,11 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -53,7 +53,7 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 	}
 	questionType := jsondns.TypeToString(question.Qtype)
 
-	requestURL := fmt.Sprintf("%s?ct=application/dns-json&name=%s&type=%s", upstream.URL, url.QueryEscape(questionName), url.QueryEscape(questionType))
+	requestURL := upstream.URL + "?ct=application/dns-json&name=" + url.QueryEscape(questionName) + "&type=" + url.QueryEscape(questionType)
 
 	if r.CheckingDisabled {
 		requestURL += "&cd=1"
@@ -69,7 +69,7 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 
 	ednsClientAddress, ednsClientNetmask := c.findClientIP(w, r)
 	if ednsClientAddress != nil {
-		requestURL += fmt.Sprintf("&edns_client_subnet=%s/%d", ednsClientAddress.String(), ednsClientNetmask)
+		requestURL += "&edns_client_subnet=" + ednsClientAddress.String() + "/" + strconv.FormatUint(uint64(ednsClientNetmask), 10)
 	}
 
 	req, err := http.NewRequest(http.MethodGet, requestURL, http.NoBody)

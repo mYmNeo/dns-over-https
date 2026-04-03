@@ -94,7 +94,7 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 	clone.Id = requestID
 
 	// Adjust TTLs downward by elapsed time
-	elapsedSec := uint32(elapsed.Seconds())
+	elapsedSec := uint32(elapsed / time.Second)
 	adjustTTLs(clone.Answer, elapsedSec)
 	adjustTTLs(clone.Ns, elapsedSec)
 	adjustTTLs(clone.Extra, elapsedSec)
@@ -179,13 +179,30 @@ func (qc *queryCache) startCleanup(ctx context.Context) {
 
 func (qc *queryCache) cleanup() {
 	now := time.Now()
-	qc.mu.Lock()
-	defer qc.mu.Unlock()
+
+	// Collect expired keys under read lock to minimize write lock hold time
+	var expired []cacheKey
+	qc.mu.RLock()
 	for key, entry := range qc.entries {
 		if now.Sub(entry.storedAt) >= entry.ttl {
+			expired = append(expired, key)
+		}
+	}
+	qc.mu.RUnlock()
+
+	if len(expired) == 0 {
+		return
+	}
+
+	// Delete expired entries under write lock
+	qc.mu.Lock()
+	for _, key := range expired {
+		// Re-check under write lock in case entry was refreshed
+		if entry, ok := qc.entries[key]; ok && now.Sub(entry.storedAt) >= entry.ttl {
 			delete(qc.entries, key)
 		}
 	}
+	qc.mu.Unlock()
 }
 
 // adjustTTLs decrements the TTL of each RR by elapsedSec, clamping at zero.

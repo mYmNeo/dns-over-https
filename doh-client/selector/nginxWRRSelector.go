@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -11,6 +12,7 @@ import (
 type NginxWRRSelector struct {
 	upstreams []*Upstream // upstreamsInfo
 	client    http.Client // http client to check the upstream
+	mu        sync.Mutex  // protects Get() for correct round-robin
 }
 
 func NewNginxWRRSelector(timeout time.Duration) *NginxWRRSelector {
@@ -47,6 +49,9 @@ func (ws *NginxWRRSelector) StartEvaluate(ctx context.Context) {
 
 // nginx wrr like.
 func (ws *NginxWRRSelector) Get() *Upstream {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
 	var (
 		total             int32
 		bestUpstreamIndex = -1
@@ -55,7 +60,8 @@ func (ws *NginxWRRSelector) Get() *Upstream {
 
 	for i := range ws.upstreams {
 		effectiveWeight := atomic.LoadInt32(&ws.upstreams[i].effectiveWeight)
-		currentWeight := atomic.AddInt32(&ws.upstreams[i].currentWeight, effectiveWeight)
+		ws.upstreams[i].currentWeight += effectiveWeight
+		currentWeight := ws.upstreams[i].currentWeight
 		total += effectiveWeight
 
 		if bestUpstreamIndex == -1 || currentWeight > bestWeight {
@@ -64,7 +70,7 @@ func (ws *NginxWRRSelector) Get() *Upstream {
 		}
 	}
 
-	atomic.AddInt32(&ws.upstreams[bestUpstreamIndex].currentWeight, -total)
+	ws.upstreams[bestUpstreamIndex].currentWeight -= total
 
 	return ws.upstreams[bestUpstreamIndex]
 }
