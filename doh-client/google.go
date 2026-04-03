@@ -113,6 +113,11 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 }
 
 func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, isTCP bool, req *DNSRequest) *dns.Msg {
+	// Note: req.response.Body is closed by the caller via defer, but we add
+	// a defensive close here for safety in case this function is called from
+	// other contexts. Multiple Close() calls on http response bodies are safe.
+	defer req.response.Body.Close()
+
 	if req.response.StatusCode != http.StatusOK {
 		log.Printf("HTTP error from upstream %s: %s\n", req.currentUpstream, req.response.Status)
 		req.reply.Rcode = dns.RcodeServerFailure

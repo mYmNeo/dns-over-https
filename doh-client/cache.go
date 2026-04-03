@@ -60,7 +60,7 @@ func newQueryCache() *queryCache {
 // by elapsed time, sets the correct request ID, and returns packed wire bytes.
 func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, isTCP bool, udpSize uint16) ([]byte, bool) {
 	key := cacheKey{
-		Name:   strings.ToLower(name),
+		Name:   name,
 		Qtype:  qtype,
 		Qclass: qclass,
 	}
@@ -91,30 +91,9 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 
 	// Adjust TTLs downward by elapsed time
 	elapsedSec := uint32(elapsed.Seconds())
-	for _, rr := range clone.Answer {
-		h := rr.Header()
-		if h.Ttl > elapsedSec {
-			h.Ttl -= elapsedSec
-		} else {
-			h.Ttl = 0
-		}
-	}
-	for _, rr := range clone.Ns {
-		h := rr.Header()
-		if h.Ttl > elapsedSec {
-			h.Ttl -= elapsedSec
-		} else {
-			h.Ttl = 0
-		}
-	}
-	for _, rr := range clone.Extra {
-		h := rr.Header()
-		if h.Ttl > elapsedSec {
-			h.Ttl -= elapsedSec
-		} else {
-			h.Ttl = 0
-		}
-	}
+	adjustTTLs(clone.Answer, elapsedSec)
+	adjustTTLs(clone.Ns, elapsedSec)
+	adjustTTLs(clone.Extra, elapsedSec)
 
 	// Truncate for UDP if needed
 	if !isTCP {
@@ -194,6 +173,18 @@ func (qc *queryCache) cleanup() {
 	for key, entry := range qc.entries {
 		if now.Sub(entry.storedAt) >= entry.ttl {
 			delete(qc.entries, key)
+		}
+	}
+}
+
+// adjustTTLs decrements the TTL of each RR by elapsedSec, clamping at zero.
+func adjustTTLs(rrs []dns.RR, elapsedSec uint32) {
+	for _, rr := range rrs {
+		h := rr.Header()
+		if h.Ttl > elapsedSec {
+			h.Ttl -= elapsedSec
+		} else {
+			h.Ttl = 0
 		}
 	}
 }

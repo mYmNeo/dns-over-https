@@ -328,7 +328,7 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 func (c *Client) newHTTPClient() error {
 	c.httpClientMux.Lock()
 	defer c.httpClientMux.Unlock()
-	if !c.httpClientLastCreate.IsZero() && time.Since(c.httpClientLastCreate) < time.Duration(c.conf.Other.Timeout)*time.Second {
+	if !c.httpClientLastCreate.IsZero() && time.Since(c.httpClientLastCreate) < 5*time.Minute {
 		return nil
 	}
 	if c.httpTransport != nil {
@@ -494,7 +494,7 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 		return
 	}
 	question := &r.Question[0]
-	questionName := question.Name
+	questionName := strings.ToLower(question.Name)
 	questionClass := jsondns.ClassToString(question.Qclass)
 	questionType := jsondns.TypeToString(question.Qtype)
 	if c.conf.Other.Verbose {
@@ -718,17 +718,34 @@ func (c *Client) isBlocked(domain string) bool {
 }
 
 func (c *Client) AddGFWFilterIP(answers []dns.RR) {
+	// Collect all IPv4 addresses from answer records
+	var ips []string
 	for _, ans := range answers {
-		// Extract IP address from DNS answer record
-		switch rr := ans.(type) {
-		case *dns.A:
-			// Handle IPv4 address
-			ip := rr.A.String()
-			log.Println("Adding IPv4 to GFW filter", "ip", ip)
-			_, err := exec.Command("ipset", "add", GFW_IPLIST, ip, "-exist").CombinedOutput()
-			if err != nil {
-				log.Println("Failed to add IP to ipset", "ip", ip, "error", err)
-			}
+		if rr, ok := ans.(*dns.A); ok {
+			ips = append(ips, rr.A.String())
+		}
+	}
+	if len(ips) == 0 {
+		return
+	}
+
+	// Batch add IPs using ipset restore via stdin pipe
+	cmd := exec.Command("ipset", "restore")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.Println("Failed to create ipset restore stdin pipe", "error", err)
+		return
+	}
+	for _, ip := range ips {
+		fmt.Fprintf(stdin, "add %s %s -exist\n", GFW_IPLIST, ip)
+	}
+	stdin.Close()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Println("Failed to add IPs to ipset via restore", "output", string(out), "error", err)
+	} else {
+		for _, ip := range ips {
+			log.Println("Added IPv4 to GFW filter", "ip", ip)
 		}
 	}
 }

@@ -82,7 +82,7 @@ func (ls *LVSWRRSelector) Get() *Upstream {
 }
 
 func (ls *LVSWRRSelector) gcdWeight() (res int32) {
-	res = gcd(atomic.LoadInt32(&ls.upstreams[0].effectiveWeight), atomic.LoadInt32(&ls.upstreams[0].effectiveWeight))
+	res = gcd(atomic.LoadInt32(&ls.upstreams[0].effectiveWeight), atomic.LoadInt32(&ls.upstreams[1].effectiveWeight))
 
 	for i := 1; i < len(ls.upstreams); i++ {
 		res = gcd(res, atomic.LoadInt32(&ls.upstreams[i].effectiveWeight))
