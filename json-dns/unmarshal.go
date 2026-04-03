@@ -52,7 +52,10 @@ func PrepareReply(req *dns.Msg) *dns.Msg {
 func Unmarshal(msg *dns.Msg, resp *Response, udpSize uint16, ednsClientNetmask uint8) *dns.Msg {
 	now := time.Now().UTC()
 
-	reply := msg.Copy()
+	// Use msg directly — PrepareReply already creates a fresh message and
+	// the caller does not reuse it after passing to Unmarshal. The Answer,
+	// Ns, and Extra slices are overwritten below, so copying is wasteful.
+	reply := msg
 	reply.Truncated = resp.TC
 	reply.AuthenticatedData = resp.AD
 	reply.CheckingDisabled = resp.CD

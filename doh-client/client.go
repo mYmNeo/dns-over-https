@@ -522,8 +522,8 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 		return
 	}
 
-	shouldPassthrough := !c.isGFWBlocked(questionName)
-	if shouldPassthrough {
+	gfwBlocked := c.isGFWBlocked(questionName)
+	if !gfwBlocked {
 		numServers := len(c.bootstrap)
 		upstream := c.bootstrap[rand.Intn(numServers)]
 		log.Printf("Request \"%s %s %s\" is passed through %s.\n", questionName, questionClass, questionType, upstream)
@@ -610,7 +610,7 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 		}
 	}
 
-	if c.isGFWBlocked(questionName) && fullReply != nil {
+	if gfwBlocked && fullReply != nil {
 		log.Println("GFW blocked:", questionName)
 		c.AddGFWFilterIP(fullReply.Answer)
 	}

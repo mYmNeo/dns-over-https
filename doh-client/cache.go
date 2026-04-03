@@ -45,14 +45,18 @@ type cacheEntry struct {
 	ttl      time.Duration // Minimum TTL across all Answer RRs
 }
 
+const defaultMaxCacheEntries = 10000
+
 type queryCache struct {
-	mu      sync.RWMutex
-	entries map[cacheKey]*cacheEntry
+	mu         sync.RWMutex
+	entries    map[cacheKey]*cacheEntry
+	maxEntries int
 }
 
 func newQueryCache() *queryCache {
 	return &queryCache{
-		entries: make(map[cacheKey]*cacheEntry),
+		entries:    make(map[cacheKey]*cacheEntry),
+		maxEntries: defaultMaxCacheEntries,
 	}
 }
 
@@ -145,6 +149,13 @@ func (qc *queryCache) put(msg *dns.Msg) {
 	}
 
 	qc.mu.Lock()
+	// Enforce maximum cache size to bound memory growth
+	if len(qc.entries) >= qc.maxEntries {
+		if _, exists := qc.entries[key]; !exists {
+			qc.mu.Unlock()
+			return
+		}
+	}
 	qc.entries[key] = entry
 	qc.mu.Unlock()
 }

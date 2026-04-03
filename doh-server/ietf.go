@@ -129,7 +129,7 @@ func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r 
 }
 
 func (s *Server) generateResponseIETF(ctx context.Context, w http.ResponseWriter, r *http.Request, req *DNSRequest) {
-	respJSON := jsondns.Marshal(req.response)
+	respMeta := jsondns.ComputeResponseMeta(req.response)
 	req.response.Id = req.transactionID
 	respBytes, err := req.response.Pack()
 	if err != nil {
@@ -138,9 +138,9 @@ func (s *Server) generateResponseIETF(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	setDNSResponseHeaders(w, "application/dns-message", respJSON, req.isTailored)
+	setDNSResponseHeaders(w, "application/dns-message", respMeta, req.isTailored)
 
-	if respJSON.Status == dns.RcodeServerFailure {
+	if respMeta.Status == dns.RcodeServerFailure {
 		log.Printf("received server failure from upstream %s: %v\n", req.currentUpstream, req.response)
 		w.WriteHeader(503)
 	}
