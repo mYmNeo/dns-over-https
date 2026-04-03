@@ -45,11 +45,7 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	opt := r.IsEdns0()
 	udpSize := uint16(512)
 	if opt == nil {
-		opt = new(dns.OPT)
-		opt.Hdr.Name = "."
-		opt.Hdr.Rrtype = dns.TypeOPT
-		opt.SetUDPSize(dns.DefaultMsgSize)
-		opt.SetDo(false)
+		opt = jsondns.NewOPTRecord(dns.DefaultMsgSize, false)
 		r.Extra = append([]dns.RR{opt}, r.Extra...)
 	} else {
 		udpSize = opt.UDPSize()
@@ -63,23 +59,12 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	}
 	ednsClientAddress, ednsClientNetmask := net.IP(nil), uint8(255)
 	if edns0Subnet == nil {
-		ednsClientFamily := uint16(0)
 		ednsClientAddress, ednsClientNetmask = c.findClientIP(w, r)
 		if ednsClientAddress != nil {
-			if ipv4 := ednsClientAddress.To4(); ipv4 != nil {
-				ednsClientFamily = 1
-				ednsClientAddress = ipv4
-				ednsClientNetmask = 24
-			} else {
-				ednsClientFamily = 2
-				ednsClientNetmask = 56
-			}
-			edns0Subnet = new(dns.EDNS0_SUBNET)
-			edns0Subnet.Code = dns.EDNS0SUBNET
-			edns0Subnet.Family = ednsClientFamily
-			edns0Subnet.SourceNetmask = ednsClientNetmask
-			edns0Subnet.SourceScope = 0
-			edns0Subnet.Address = ednsClientAddress
+			ednsClientFamily, netmask, addr := jsondns.GetEDNSClientInfo(ednsClientAddress, false)
+			ednsClientAddress = addr
+			ednsClientNetmask = netmask
+			edns0Subnet = jsondns.NewEDNS0Subnet(ednsClientFamily, ednsClientNetmask, ednsClientAddress)
 			opt.Option = append(opt.Option, edns0Subnet)
 		}
 	} else {
@@ -90,13 +75,7 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	r.Id = 0
 	requestBinary, err := r.Pack()
 	if err != nil {
-		log.Println(err)
-		reply := jsondns.PrepareReply(r)
-		reply.Rcode = dns.RcodeFormatError
-		w.WriteMsg(reply)
-		return &DNSRequest{
-			err: err,
-		}
+		return sendErrorReply(w, r, dns.RcodeFormatError, err)
 	}
 	r.Id = requestID
 	requestBase64 := base64.RawURLEncoding.EncodeToString(requestBinary)
@@ -107,24 +86,12 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	if len(requestURL) < 2048 {
 		req, err = http.NewRequest(http.MethodGet, requestURL, http.NoBody)
 		if err != nil {
-			log.Println(err)
-			reply := jsondns.PrepareReply(r)
-			reply.Rcode = dns.RcodeServerFailure
-			w.WriteMsg(reply)
-			return &DNSRequest{
-				err: err,
-			}
+			return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 		}
 	} else {
 		req, err = http.NewRequest(http.MethodPost, upstream.URL, bytes.NewReader(requestBinary))
 		if err != nil {
-			log.Println(err)
-			reply := jsondns.PrepareReply(r)
-			reply.Rcode = dns.RcodeServerFailure
-			w.WriteMsg(reply)
-			return &DNSRequest{
-				err: err,
-			}
+			return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 		}
 		req.Header.Set("Content-Type", "application/dns-message")
 	}
@@ -149,13 +116,7 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	}*/
 
 	if err != nil {
-		log.Println(err)
-		reply := jsondns.PrepareReply(r)
-		reply.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(reply)
-		return &DNSRequest{
-			err: err,
-		}
+		return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 	}
 
 	return &DNSRequest{

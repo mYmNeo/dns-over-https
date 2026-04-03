@@ -176,13 +176,13 @@ func (s *Server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-		if strings.ContainsRune(realIP, ':') {
-			r.RemoteAddr = "[" + realIP + "]:0"
+		if ip := net.ParseIP(realIP); ip != nil {
+			if ip.To4() != nil {
+				r.RemoteAddr = realIP + ":0"
+			} else {
+				r.RemoteAddr = "[" + realIP + "]:0"
+			}
 		} else {
-			r.RemoteAddr = realIP + ":0"
-		}
-		_, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
 			r.RemoteAddr = realIP
 		}
 	}

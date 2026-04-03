@@ -32,7 +32,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/miekg/dns"
 	"golang.org/x/net/idna"
@@ -104,31 +103,17 @@ func (s *Server) parseRequestGoogle(ctx context.Context, w http.ResponseWriter, 
 		ednsClientAddress = s.findClientIP(r)
 		if ednsClientAddress == nil {
 			ednsClientNetmask = 0
-		} else if ipv4 := ednsClientAddress.To4(); ipv4 != nil {
-			ednsClientFamily = 1
-			ednsClientAddress = ipv4
-			ednsClientNetmask = 24
 		} else {
-			ednsClientFamily = 2
-			ednsClientNetmask = 56
+			ednsClientFamily, ednsClientNetmask, ednsClientAddress = jsondns.GetEDNSClientInfo(ednsClientAddress, false)
 		}
 	}
 
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(name), rrType)
 	msg.CheckingDisabled = cd
-	opt := new(dns.OPT)
-	opt.Hdr.Name = "."
-	opt.Hdr.Rrtype = dns.TypeOPT
-	opt.SetUDPSize(dns.DefaultMsgSize)
-	opt.SetDo(true)
+	opt := jsondns.NewOPTRecord(dns.DefaultMsgSize, true)
 	if ednsClientAddress != nil {
-		edns0Subnet := new(dns.EDNS0_SUBNET)
-		edns0Subnet.Code = dns.EDNS0SUBNET
-		edns0Subnet.Family = ednsClientFamily
-		edns0Subnet.SourceNetmask = ednsClientNetmask
-		edns0Subnet.SourceScope = 0
-		edns0Subnet.Address = ednsClientAddress
+		edns0Subnet := jsondns.NewEDNS0Subnet(ednsClientFamily, ednsClientNetmask, ednsClientAddress)
 		opt.Option = append(opt.Option, edns0Subnet)
 	}
 	msg.Extra = append(msg.Extra, opt)
@@ -187,19 +172,7 @@ func (s *Server) generateResponseGoogle(ctx context.Context, w http.ResponseWrit
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	now := time.Now().UTC().Format(http.TimeFormat)
-	w.Header().Set("Date", now)
-	w.Header().Set("Last-Modified", now)
-	w.Header().Set("Vary", "Accept")
-	if respJSON.HaveTTL {
-		if req.isTailored {
-			w.Header().Set("Cache-Control", "private, max-age="+strconv.FormatUint(uint64(respJSON.LeastTTL), 10))
-		} else {
-			w.Header().Set("Cache-Control", "public, max-age="+strconv.FormatUint(uint64(respJSON.LeastTTL), 10))
-		}
-		w.Header().Set("Expires", respJSON.EarliestExpires.Format(http.TimeFormat))
-	}
+	setDNSResponseHeaders(w, "application/json; charset=UTF-8", respJSON, req.isTailored)
 	if respJSON.Status == dns.RcodeServerFailure {
 		w.WriteHeader(503)
 	}

@@ -1,11 +1,10 @@
 package selector
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"log"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -29,90 +28,27 @@ func (ls *LVSWRRSelector) Add(url string, upstreamType UpstreamType, weight int3
 		return errors.New("weight is 1")
 	}
 
-	switch upstreamType {
-	case Google:
-		ls.upstreams = append(ls.upstreams, &Upstream{
-			Type:            Google,
-			URL:             url,
-			RequestType:     "application/dns-json",
-			weight:          weight,
-			effectiveWeight: weight,
-		})
-
-	case IETF:
-		ls.upstreams = append(ls.upstreams, &Upstream{
-			Type:            IETF,
-			URL:             url,
-			RequestType:     "application/dns-message",
-			weight:          weight,
-			effectiveWeight: weight,
-		})
-
-	default:
-		return errors.New("unknown upstream type")
+	upstream, err := NewUpstream(upstreamType, url, weight)
+	if err != nil {
+		return err
 	}
-
+	ls.upstreams = append(ls.upstreams, upstream)
 	return nil
 }
 
-func (ls *LVSWRRSelector) StartEvaluate() {
+func (ls *LVSWRRSelector) StartEvaluate(ctx context.Context) {
 	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+
 		for {
-			wg := sync.WaitGroup{}
+			healthCheckUpstreams(ls.upstreams, &ls.client, -5, checkGoogleResponse, checkIETFResponse)
 
-			for i := range ls.upstreams {
-				wg.Add(1)
-
-				go func(i int) {
-					defer wg.Done()
-
-					upstreamURL := ls.upstreams[i].URL
-					var acceptType string
-
-					switch ls.upstreams[i].Type {
-					case Google:
-						upstreamURL += "?name=www.example.com&type=A"
-						acceptType = "application/dns-json"
-
-					case IETF:
-						// www.example.com
-						upstreamURL += "?dns=q80BAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB"
-						acceptType = "application/dns-message"
-					}
-
-					req, err := http.NewRequest(http.MethodGet, upstreamURL, http.NoBody)
-					if err != nil {
-						/*log.Println("upstream:", upstreamURL, "type:", typeMap[upstream.Type], "check failed:", err)
-						continue*/
-
-						// should I only log it? But if there is an error, I think when query the server will return error too
-						panic("upstream: " + upstreamURL + " type: " + typeMap[ls.upstreams[i].Type] + " check failed: " + err.Error())
-					}
-
-					req.Header.Set("accept", acceptType)
-
-					resp, err := ls.client.Do(req)
-					if err != nil {
-						// should I check error in detail?
-						if atomic.AddInt32(&ls.upstreams[i].effectiveWeight, -5) < 1 {
-							atomic.StoreInt32(&ls.upstreams[i].effectiveWeight, 1)
-						}
-						return
-					}
-
-					switch ls.upstreams[i].Type {
-					case Google:
-						ls.checkGoogleResponse(resp, ls.upstreams[i])
-
-					case IETF:
-						ls.checkIETFResponse(resp, ls.upstreams[i])
-					}
-				}(i)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
 			}
-
-			wg.Wait()
-
-			time.Sleep(15 * time.Second)
 		}
 	}()
 }
@@ -123,22 +59,24 @@ func (ls *LVSWRRSelector) Get() *Upstream {
 	}
 
 	for {
-		atomic.StoreInt32(&ls.lastChoose, (atomic.LoadInt32(&ls.lastChoose)+1)%int32(len(ls.upstreams)))
+		lastChoose := (atomic.LoadInt32(&ls.lastChoose) + 1) % int32(len(ls.upstreams))
+		atomic.StoreInt32(&ls.lastChoose, lastChoose)
 
-		if atomic.LoadInt32(&ls.lastChoose) == 0 {
-			atomic.AddInt32(&ls.currentWeight, -ls.gcdWeight())
+		if lastChoose == 0 {
+			currentWeight := atomic.AddInt32(&ls.currentWeight, -ls.gcdWeight())
 
-			if atomic.LoadInt32(&ls.currentWeight) <= 0 {
-				atomic.AddInt32(&ls.currentWeight, ls.maxWeight())
+			if currentWeight <= 0 {
+				currentWeight = atomic.AddInt32(&ls.currentWeight, ls.maxWeight())
 
-				if atomic.LoadInt32(&ls.currentWeight) == 0 {
+				if currentWeight == 0 {
 					panic("current weight is 0")
 				}
 			}
 		}
 
-		if atomic.LoadInt32(&ls.upstreams[atomic.LoadInt32(&ls.lastChoose)].effectiveWeight) >= atomic.LoadInt32(&ls.currentWeight) {
-			return ls.upstreams[atomic.LoadInt32(&ls.lastChoose)]
+		currentWeight := atomic.LoadInt32(&ls.currentWeight)
+		if atomic.LoadInt32(&ls.upstreams[lastChoose].effectiveWeight) >= currentWeight {
+			return ls.upstreams[lastChoose]
 		}
 	}
 }
@@ -182,80 +120,27 @@ func gcd(x, y int32) int32 {
 func (ls *LVSWRRSelector) ReportUpstreamStatus(upstream *Upstream, upstreamStatus upstreamStatus) {
 	switch upstreamStatus {
 	case Timeout:
-		if atomic.AddInt32(&upstream.effectiveWeight, -5) < 1 {
-			atomic.StoreInt32(&upstream.effectiveWeight, 1)
-		}
-
+		adjustWeight(upstream, -5)
 	case Error:
-		if atomic.AddInt32(&upstream.effectiveWeight, -2) < 1 {
-			atomic.StoreInt32(&upstream.effectiveWeight, 1)
-		}
-
+		adjustWeight(upstream, -2)
 	case OK:
-		if atomic.AddInt32(&upstream.effectiveWeight, 1) > upstream.weight {
-			atomic.StoreInt32(&upstream.effectiveWeight, upstream.weight)
-		}
+		adjustWeight(upstream, 1)
 	}
 }
 
-func (ls *LVSWRRSelector) checkGoogleResponse(resp *http.Response, upstream *Upstream) {
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// server error
-		if atomic.AddInt32(&upstream.effectiveWeight, -3) < 1 {
-			atomic.StoreInt32(&upstream.effectiveWeight, 1)
-		}
-		return
-	}
-
-	m := make(map[string]interface{})
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
-		// should I check error in detail?
-		if atomic.AddInt32(&upstream.effectiveWeight, -2) < 1 {
-			atomic.StoreInt32(&upstream.effectiveWeight, 1)
-		}
-		return
-	}
-
-	if status, ok := m["Status"]; ok {
-		if statusNum, ok := status.(float64); ok && statusNum == 0 {
-			if atomic.AddInt32(&upstream.effectiveWeight, 5) > upstream.weight {
-				atomic.StoreInt32(&upstream.effectiveWeight, upstream.weight)
-			}
-			return
-		}
-	}
-
-	// should I check error in detail?
-	if atomic.AddInt32(&upstream.effectiveWeight, -2) < 1 {
-		atomic.StoreInt32(&upstream.effectiveWeight, 1)
-	}
-}
-
-func (ls *LVSWRRSelector) checkIETFResponse(resp *http.Response, upstream *Upstream) {
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		// server error
-		if atomic.AddInt32(&upstream.effectiveWeight, -3) < 1 {
-			atomic.StoreInt32(&upstream.effectiveWeight, 1)
-		}
-		return
-	}
-
-	if atomic.AddInt32(&upstream.effectiveWeight, 5) > upstream.weight {
-		atomic.StoreInt32(&upstream.effectiveWeight, upstream.weight)
-	}
-}
-
-func (ls *LVSWRRSelector) ReportWeights() {
+func (ls *LVSWRRSelector) ReportWeights(ctx context.Context) {
 	go func() {
-		for {
-			time.Sleep(15 * time.Second)
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
 
-			for _, u := range ls.upstreams {
-				log.Printf("%s, effect weight: %d", u, atomic.LoadInt32(&u.effectiveWeight))
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, u := range ls.upstreams {
+					log.Printf("%s, effect weight: %d", u, atomic.LoadInt32(&u.effectiveWeight))
+				}
 			}
 		}
 	}()

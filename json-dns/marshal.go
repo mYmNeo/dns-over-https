@@ -26,7 +26,6 @@ package jsondns
 import (
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -114,9 +113,19 @@ func marshalRR(rr dns.RR, now time.Time) RR {
 	jsonRR.TTL = rrHeader.Ttl
 	jsonRR.Expires = now.Add(time.Duration(jsonRR.TTL) * time.Second)
 	jsonRR.ExpiresStr = jsonRR.Expires.Format(time.RFC1123)
-	data := strings.SplitN(rr.String(), "\t", 5)
-	if len(data) >= 5 {
-		jsonRR.Data = data[4]
+
+	// Extract data field by scanning for the 4th tab in the RR string representation.
+	// Format: "name\tTTL\tCLASS\tTYPE\tDATA"
+	s := rr.String()
+	tabCount := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\t' {
+			tabCount++
+			if tabCount == 4 {
+				jsonRR.Data = s[i+1:]
+				break
+			}
+		}
 	}
 	return jsonRR
 }

@@ -1,6 +1,9 @@
 package selector
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 type UpstreamType int
 
@@ -14,6 +17,12 @@ var typeMap = map[UpstreamType]string{
 	IETF:   "IETF",
 }
 
+// requestTypeMap maps upstream types to their Accept/Content-Type header values.
+var requestTypeMap = map[UpstreamType]string{
+	Google: "application/dns-json",
+	IETF:   "application/dns-message",
+}
+
 type Upstream struct {
 	Type            UpstreamType
 	URL             string
@@ -25,4 +34,20 @@ type Upstream struct {
 
 func (u Upstream) String() string {
 	return fmt.Sprintf("upstream type: %s, upstream url: %s", typeMap[u.Type], u.URL)
+}
+
+// NewUpstream creates a new Upstream with the given type, URL, and weight.
+// Weight is used for weighted round-robin selectors; pass 0 for random selector.
+func NewUpstream(upstreamType UpstreamType, url string, weight int32) (*Upstream, error) {
+	requestType, ok := requestTypeMap[upstreamType]
+	if !ok {
+		return nil, errors.New("unknown upstream type")
+	}
+	return &Upstream{
+		Type:            upstreamType,
+		URL:             url,
+		RequestType:     requestType,
+		weight:          weight,
+		effectiveWeight: weight,
+	}, nil
 }

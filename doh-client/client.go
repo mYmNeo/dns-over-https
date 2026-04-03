@@ -290,7 +290,7 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 
 	if c.conf.Other.Verbose {
 		if reporter, ok := c.selector.(selector.DebugReporter); ok {
-			reporter.ReportWeights()
+			reporter.ReportWeights(context.Background())
 		}
 	}
 
@@ -459,7 +459,9 @@ func (c *Client) Start() error {
 	}
 
 	// start evaluation loop
-	c.selector.StartEvaluate()
+	ctx, cancel := context.WithCancel(context.Background())
+	_ = cancel // caller can use this to stop health-check goroutines
+	c.selector.StartEvaluate(ctx)
 
 	for i := 0; i < cap(results); i++ {
 		err := <-results
@@ -490,18 +492,8 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	}
 	question := &r.Question[0]
 	questionName := question.Name
-	questionClass := ""
-	if qclass, ok := dns.ClassToString[question.Qclass]; ok {
-		questionClass = qclass
-	} else {
-		questionClass = strconv.FormatUint(uint64(question.Qclass), 10)
-	}
-	questionType := ""
-	if qtype, ok := dns.TypeToString[question.Qtype]; ok {
-		questionType = qtype
-	} else {
-		questionType = strconv.FormatUint(uint64(question.Qtype), 10)
-	}
+	questionClass := jsondns.ClassToString(question.Qclass)
+	questionType := jsondns.TypeToString(question.Qtype)
 	if c.conf.Other.Verbose {
 		fmt.Printf("%s - - [%s] \"%s %s %s\"\n", w.RemoteAddr(), time.Now().Format("02/Jan/2006:15:04:05 -0700"), questionName, questionClass, questionType)
 	}
@@ -576,7 +568,10 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 		}
 	}
 
-	candidateType := strings.SplitN(req.response.Header.Get("Content-Type"), ";", 2)[0]
+	candidateType := req.response.Header.Get("Content-Type")
+	if idx := strings.IndexByte(candidateType, ';'); idx >= 0 {
+		candidateType = candidateType[:idx]
+	}
 
 	var fullReply *dns.Msg
 	switch candidateType {
@@ -628,11 +623,6 @@ func (c *Client) tcpHandlerFunc(w dns.ResponseWriter, r *dns.Msg) {
 	c.handlerFunc(w, r, true)
 }
 
-var (
-	ipv4Mask24 = net.IPMask{255, 255, 255, 0}
-	ipv6Mask56 = net.CIDRMask(56, 128)
-)
-
 func (c *Client) findClientIP(w dns.ResponseWriter, r *dns.Msg) (ednsClientAddress net.IP, ednsClientNetmask uint8) {
 	ednsClientNetmask = 255
 	if c.conf.Other.NoECS {
@@ -653,13 +643,7 @@ func (c *Client) findClientIP(w dns.ResponseWriter, r *dns.Msg) (ednsClientAddre
 		return
 	}
 	if ip := remoteAddr.IP; jsondns.IsGlobalIP(ip) {
-		if ipv4 := ip.To4(); ipv4 != nil {
-			ednsClientAddress = ipv4.Mask(ipv4Mask24)
-			ednsClientNetmask = 24
-		} else {
-			ednsClientAddress = ip.Mask(ipv6Mask56)
-			ednsClientNetmask = 56
-		}
+		_, ednsClientNetmask, ednsClientAddress = jsondns.GetEDNSClientInfo(ip, false)
 	}
 	return
 }
