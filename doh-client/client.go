@@ -74,6 +74,7 @@ type Client struct {
 	blockList            *gfwlist.GFWList
 	bootstrap            []string
 	routerRules          RouterRules
+	cache                *queryCache
 }
 
 type DNSRequest struct {
@@ -92,7 +93,8 @@ const (
 
 func NewClient(conf *config.Config) (c *Client, err error) {
 	c = &Client{
-		conf: conf,
+		conf:  conf,
+		cache: newQueryCache(),
 	}
 
 	udpHandler := dns.HandlerFunc(c.udpHandlerFunc)
@@ -462,6 +464,7 @@ func (c *Client) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	_ = cancel // caller can use this to stop health-check goroutines
 	c.selector.StartEvaluate(ctx)
+	c.cache.startCleanup(ctx)
 
 	for i := 0; i < cap(results); i++ {
 		err := <-results
@@ -503,6 +506,19 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 		reply := jsondns.PrepareReply(r)
 		reply.Rcode = dns.RcodeRefused
 		w.WriteMsg(reply)
+		return
+	}
+
+	// Check cache
+	udpSize := uint16(dns.DefaultMsgSize)
+	if opt := r.IsEdns0(); opt != nil {
+		udpSize = opt.UDPSize()
+	}
+	if buf, ok := c.cache.get(questionName, question.Qtype, question.Qclass, r.Id, isTCP, udpSize); ok {
+		if c.conf.Other.Verbose {
+			log.Printf("cache hit: %s %s %s\n", questionName, questionClass, questionType)
+		}
+		w.Write(buf)
 		return
 	}
 
@@ -597,6 +613,10 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	if c.isGFWBlocked(questionName) && fullReply != nil {
 		log.Println("GFW blocked:", questionName)
 		c.AddGFWFilterIP(fullReply.Answer)
+	}
+
+	if fullReply != nil {
+		c.cache.put(fullReply)
 	}
 
 	// https://developers.cloudflare.com/1.1.1.1/dns-over-https/request-structure/ says
