@@ -33,7 +33,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -91,18 +90,8 @@ func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r 
 	if s.conf.Verbose && len(msg.Question) > 0 {
 		question := &msg.Question[0]
 		questionName := question.Name
-		questionClass := ""
-		if qclass, ok := dns.ClassToString[question.Qclass]; ok {
-			questionClass = qclass
-		} else {
-			questionClass = strconv.FormatUint(uint64(question.Qclass), 10)
-		}
-		questionType := ""
-		if qtype, ok := dns.TypeToString[question.Qtype]; ok {
-			questionType = qtype
-		} else {
-			questionType = strconv.FormatUint(uint64(question.Qtype), 10)
-		}
+		questionClass := jsondns.ClassToString(question.Qclass)
+		questionType := jsondns.TypeToString(question.Qtype)
 		var clientip net.IP = nil
 		if s.conf.LogGuessedIP {
 			clientip = s.findClientIP(r)
@@ -118,11 +107,7 @@ func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r 
 	msg.Id = dns.Id()
 	opt := msg.IsEdns0()
 	if opt == nil {
-		opt = new(dns.OPT)
-		opt.Hdr.Name = "."
-		opt.Hdr.Rrtype = dns.TypeOPT
-		opt.SetUDPSize(dns.DefaultMsgSize)
-		opt.SetDo(false)
+		opt = jsondns.NewOPTRecord(dns.DefaultMsgSize, false)
 		msg.Extra = append([]dns.RR{opt}, msg.Extra...)
 	}
 	var edns0Subnet *dns.EDNS0_SUBNET
@@ -135,34 +120,10 @@ func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r 
 	isTailored := edns0Subnet == nil
 
 	if edns0Subnet == nil {
-		ednsClientFamily := uint16(0)
 		ednsClientAddress := s.findClientIP(r)
-		ednsClientNetmask := uint8(255)
 		if ednsClientAddress != nil {
-			if ipv4 := ednsClientAddress.To4(); ipv4 != nil {
-				ednsClientFamily = 1
-				ednsClientAddress = ipv4
-				if s.conf.ECSUsePreciseIP {
-					ednsClientNetmask = 32
-				} else {
-					ednsClientNetmask = 24
-					ednsClientAddress = ednsClientAddress.Mask(net.CIDRMask(24, 32))
-				}
-			} else {
-				ednsClientFamily = 2
-				if s.conf.ECSUsePreciseIP {
-					ednsClientNetmask = 128
-				} else {
-					ednsClientNetmask = 56
-					ednsClientAddress = ednsClientAddress.Mask(net.CIDRMask(56, 128))
-				}
-			}
-			edns0Subnet = new(dns.EDNS0_SUBNET)
-			edns0Subnet.Code = dns.EDNS0SUBNET
-			edns0Subnet.Family = ednsClientFamily
-			edns0Subnet.SourceNetmask = ednsClientNetmask
-			edns0Subnet.SourceScope = 0
-			edns0Subnet.Address = ednsClientAddress
+			ednsClientFamily, ednsClientNetmask, ednsClientAddress := jsondns.GetEDNSClientInfo(ednsClientAddress, s.conf.ECSUsePreciseIP)
+			edns0Subnet = jsondns.NewEDNS0Subnet(ednsClientFamily, ednsClientNetmask, ednsClientAddress)
 			opt.Option = append(opt.Option, edns0Subnet)
 		}
 	}
@@ -184,20 +145,7 @@ func (s *Server) generateResponseIETF(ctx context.Context, w http.ResponseWriter
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/dns-message")
-	now := time.Now().UTC().Format(http.TimeFormat)
-	w.Header().Set("Date", now)
-	w.Header().Set("Last-Modified", now)
-	w.Header().Set("Vary", "Accept")
-
-	if respJSON.HaveTTL {
-		if req.isTailored {
-			w.Header().Set("Cache-Control", "private, max-age="+strconv.FormatUint(uint64(respJSON.LeastTTL), 10))
-		} else {
-			w.Header().Set("Cache-Control", "public, max-age="+strconv.FormatUint(uint64(respJSON.LeastTTL), 10))
-		}
-		w.Header().Set("Expires", respJSON.EarliestExpires.Format(http.TimeFormat))
-	}
+	setDNSResponseHeaders(w, "application/dns-message", respJSON, req.isTailored)
 
 	if respJSON.Status == dns.RcodeServerFailure {
 		log.Printf("received server failure from upstream %s: %v\n", req.currentUpstream, req.response)

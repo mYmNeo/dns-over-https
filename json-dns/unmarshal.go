@@ -79,15 +79,10 @@ func Unmarshal(msg *dns.Msg, resp *Response, udpSize uint16, ednsClientNetmask u
 	}
 
 	reply.Extra = make([]dns.RR, 0, len(resp.Additional)+1)
-	opt := new(dns.OPT)
-	opt.Hdr.Name = "."
-	opt.Hdr.Rrtype = dns.TypeOPT
+	opt := NewOPTRecord(512, false)
 	if udpSize >= 512 {
 		opt.SetUDPSize(udpSize)
-	} else {
-		opt.SetUDPSize(512)
 	}
-	opt.SetDo(false)
 	ednsClientSubnet := resp.EdnsClientSubnet
 	ednsClientFamily := uint16(0)
 	ednsClientAddress := net.IP(nil)
@@ -122,12 +117,8 @@ func Unmarshal(msg *dns.Msg, resp *Response, udpSize uint16, ednsClientNetmask u
 				ednsClientNetmask = 56
 			}
 		}
-		edns0Subnet := new(dns.EDNS0_SUBNET)
-		edns0Subnet.Code = dns.EDNS0SUBNET
-		edns0Subnet.Family = ednsClientFamily
-		edns0Subnet.SourceNetmask = ednsClientNetmask
+		edns0Subnet := NewEDNS0Subnet(ednsClientFamily, ednsClientNetmask, ednsClientAddress)
 		edns0Subnet.SourceScope = ednsClientScope
-		edns0Subnet.Address = ednsClientAddress
 		opt.Option = append(opt.Option, edns0Subnet)
 	}
 	reply.Extra = append(reply.Extra, opt)

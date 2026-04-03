@@ -31,7 +31,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -52,12 +51,7 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 			err: &dns.Error{},
 		}
 	}
-	questionType := ""
-	if qtype, ok := dns.TypeToString[question.Qtype]; ok {
-		questionType = qtype
-	} else {
-		questionType = strconv.FormatUint(uint64(question.Qtype), 10)
-	}
+	questionType := jsondns.TypeToString(question.Qtype)
 
 	requestURL := fmt.Sprintf("%s?ct=application/dns-json&name=%s&type=%s", upstream.URL, url.QueryEscape(questionName), url.QueryEscape(questionType))
 
@@ -80,13 +74,7 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 
 	req, err := http.NewRequest(http.MethodGet, requestURL, http.NoBody)
 	if err != nil {
-		log.Println(err)
-		reply := jsondns.PrepareReply(r)
-		reply.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(reply)
-		return &DNSRequest{
-			err: err,
-		}
+		return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 	}
 
 	req.Header.Set("Accept", "application/json, application/dns-message, application/dns-udpwireformat")
@@ -111,13 +99,7 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 	}*/
 
 	if err != nil {
-		log.Println(err)
-		reply := jsondns.PrepareReply(r)
-		reply.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(reply)
-		return &DNSRequest{
-			err: err,
-		}
+		return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 	}
 
 	return &DNSRequest{
