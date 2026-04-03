@@ -36,15 +36,11 @@ func (r *urlWildcardRule) match(domain string) bool {
 }
 
 type regexRule struct {
-	pattern string
+	re *regexp.Regexp
 }
 
 func (r *regexRule) match(domain string) bool {
-	matched, err := regexp.MatchString(r.pattern, domain)
-	if err != nil {
-		slog.Error("Invalid regex patterns", "patterns", r.pattern, "error", err)
-	}
-	return matched
+	return r.re.MatchString(domain)
 }
 
 type whiteListRule struct {
@@ -139,7 +135,12 @@ func Parse(rules string) (*GFWList, error) {
 		}
 		if strings.HasPrefix(str, "/") && strings.HasSuffix(str, "/") {
 			str = str[1 : len(str)-1]
-			rule = &regexRule{str}
+			re, err := regexp.Compile(str)
+			if err != nil {
+				slog.Error("Invalid regex pattern, skipping", "pattern", str, "error", err)
+				continue
+			}
+			rule = &regexRule{re}
 		} else {
 			if strings.HasPrefix(str, "||") {
 				fastMatch = true
@@ -162,6 +163,8 @@ func Parse(rules string) (*GFWList, error) {
 		}
 		if fastMatch {
 			gfw.ruleMap[str] = rule
+		} else {
+			gfw.ruleList = append(gfw.ruleList, rule)
 		}
 	}
 	return gfw, nil

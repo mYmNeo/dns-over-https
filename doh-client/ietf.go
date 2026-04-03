@@ -130,6 +130,8 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 }
 
 func (c *Client) parseResponseIETF(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, isTCP bool, req *DNSRequest) *dns.Msg {
+	defer req.response.Body.Close()
+
 	if req.response.StatusCode != http.StatusOK {
 		log.Printf("HTTP error from upstream %s: %s\n", req.currentUpstream, req.response.Status)
 		req.reply.Rcode = dns.RcodeServerFailure
