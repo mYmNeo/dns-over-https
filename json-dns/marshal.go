@@ -105,6 +105,43 @@ func Marshal(msg *dns.Msg) *Response {
 	return resp
 }
 
+// ComputeResponseMeta computes only the metadata fields (Status, HaveTTL,
+// LeastTTL, EarliestExpires) from a dns.Msg without performing full string
+// conversion of RR data. This is much cheaper than Marshal when only the
+// metadata is needed (e.g., for setting HTTP cache headers on binary responses).
+func ComputeResponseMeta(msg *dns.Msg) *Response {
+	now := time.Now().UTC()
+
+	resp := &Response{
+		Status: uint32(msg.Rcode),
+	}
+
+	// Scan all sections for minimum TTL
+	scanTTL := func(rrs []dns.RR) {
+		for _, rr := range rrs {
+			header := rr.Header()
+			if header.Rrtype == dns.TypeOPT {
+				opt := rr.(*dns.OPT)
+				resp.Status = ((opt.Hdr.Ttl & 0xff000000) >> 20) | (resp.Status & 0xff)
+				continue
+			}
+			ttl := header.Ttl
+			expires := now.Add(time.Duration(ttl) * time.Second)
+			if !resp.HaveTTL || ttl < resp.LeastTTL {
+				resp.HaveTTL = true
+				resp.LeastTTL = ttl
+				resp.EarliestExpires = expires
+			}
+		}
+	}
+
+	scanTTL(msg.Answer)
+	scanTTL(msg.Ns)
+	scanTTL(msg.Extra)
+
+	return resp
+}
+
 func marshalRR(rr dns.RR, now time.Time) RR {
 	jsonRR := RR{}
 	rrHeader := rr.Header()

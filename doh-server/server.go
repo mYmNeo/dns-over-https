@@ -48,6 +48,7 @@ type Server struct {
 	tcpClient    *dns.Client
 	tcpClientTLS *dns.Client
 	servemux     *http.ServeMux
+	cachedCert   *tls.Certificate
 }
 
 type DNSRequest struct {
@@ -126,6 +127,15 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Pre-load TLS certificate to avoid disk I/O on every TLS handshake
+	if s.conf.Cert != "" && s.conf.Key != "" {
+		cert, err := tls.LoadX509KeyPair(s.conf.Cert, s.conf.Key)
+		if err != nil {
+			return fmt.Errorf("failed to load TLS certificate: %w", err)
+		}
+		s.cachedCert = &cert
+	}
+
 	results := make(chan error, len(s.conf.Listen))
 	for _, addr := range s.conf.Listen {
 		go func(addr string) {
@@ -139,12 +149,7 @@ func (s *Server) Start() error {
 							ClientCAs:  clientCAPool,
 							ClientAuth: tls.RequireAndVerifyClientCert,
 							GetCertificate: func(info *tls.ClientHelloInfo) (certificate *tls.Certificate, e error) {
-								c, err := tls.LoadX509KeyPair(s.conf.Cert, s.conf.Key)
-								if err != nil {
-									fmt.Printf("Error loading server certificate key pair: %v\n", err)
-									return nil, err
-								}
-								return &c, nil
+								return s.cachedCert, nil
 							},
 						},
 					}

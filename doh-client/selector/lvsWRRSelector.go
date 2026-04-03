@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -12,8 +13,11 @@ import (
 type LVSWRRSelector struct {
 	upstreams     []*Upstream // upstreamsInfo
 	client        http.Client // http client to check the upstream
+	mu            sync.Mutex  // protects Get() for correct round-robin
 	lastChoose    int32
 	currentWeight int32
+	cachedGCD     int32
+	cachedMax     int32
 }
 
 func NewLVSWRRSelector(timeout time.Duration) *LVSWRRSelector {
@@ -33,6 +37,7 @@ func (ls *LVSWRRSelector) Add(url string, upstreamType UpstreamType, weight int3
 		return err
 	}
 	ls.upstreams = append(ls.upstreams, upstream)
+	ls.updateCachedWeights()
 	return nil
 }
 
@@ -43,6 +48,7 @@ func (ls *LVSWRRSelector) StartEvaluate(ctx context.Context) {
 
 		for {
 			healthCheckUpstreams(ls.upstreams, &ls.client, -5, checkGoogleResponse, checkIETFResponse)
+			ls.updateCachedWeights()
 
 			select {
 			case <-ctx.Done():
@@ -58,48 +64,58 @@ func (ls *LVSWRRSelector) Get() *Upstream {
 		return ls.upstreams[0]
 	}
 
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
 	for {
-		lastChoose := (atomic.LoadInt32(&ls.lastChoose) + 1) % int32(len(ls.upstreams))
-		atomic.StoreInt32(&ls.lastChoose, lastChoose)
+		ls.lastChoose = (ls.lastChoose + 1) % int32(len(ls.upstreams))
 
-		if lastChoose == 0 {
-			currentWeight := atomic.AddInt32(&ls.currentWeight, -ls.gcdWeight())
+		if ls.lastChoose == 0 {
+			ls.currentWeight -= ls.cachedGCD
 
-			if currentWeight <= 0 {
-				currentWeight = atomic.AddInt32(&ls.currentWeight, ls.maxWeight())
+			if ls.currentWeight <= 0 {
+				ls.currentWeight = ls.cachedMax
 
-				if currentWeight == 0 {
+				if ls.currentWeight == 0 {
 					panic("current weight is 0")
 				}
 			}
 		}
 
-		currentWeight := atomic.LoadInt32(&ls.currentWeight)
-		if atomic.LoadInt32(&ls.upstreams[lastChoose].effectiveWeight) >= currentWeight {
-			return ls.upstreams[lastChoose]
+		if atomic.LoadInt32(&ls.upstreams[ls.lastChoose].effectiveWeight) >= ls.currentWeight {
+			return ls.upstreams[ls.lastChoose]
 		}
 	}
 }
 
-func (ls *LVSWRRSelector) gcdWeight() (res int32) {
-	res = gcd(atomic.LoadInt32(&ls.upstreams[0].effectiveWeight), atomic.LoadInt32(&ls.upstreams[1].effectiveWeight))
-
-	for i := 1; i < len(ls.upstreams); i++ {
-		res = gcd(res, atomic.LoadInt32(&ls.upstreams[i].effectiveWeight))
+// updateCachedWeights recomputes and caches the GCD and max weight values.
+func (ls *LVSWRRSelector) updateCachedWeights() {
+	if len(ls.upstreams) < 2 {
+		if len(ls.upstreams) == 1 {
+			w := atomic.LoadInt32(&ls.upstreams[0].effectiveWeight)
+			ls.cachedGCD = w
+			ls.cachedMax = w
+		}
+		return
 	}
 
-	return
-}
+	gcdVal := gcd(atomic.LoadInt32(&ls.upstreams[0].effectiveWeight), atomic.LoadInt32(&ls.upstreams[1].effectiveWeight))
+	for i := 2; i < len(ls.upstreams); i++ {
+		gcdVal = gcd(gcdVal, atomic.LoadInt32(&ls.upstreams[i].effectiveWeight))
+	}
 
-func (ls *LVSWRRSelector) maxWeight() (res int32) {
+	var maxVal int32
 	for _, upstream := range ls.upstreams {
 		w := atomic.LoadInt32(&upstream.effectiveWeight)
-		if w > res {
-			res = w
+		if w > maxVal {
+			maxVal = w
 		}
 	}
 
-	return
+	ls.mu.Lock()
+	ls.cachedGCD = gcdVal
+	ls.cachedMax = maxVal
+	ls.mu.Unlock()
 }
 
 func gcd(x, y int32) int32 {
@@ -126,6 +142,7 @@ func (ls *LVSWRRSelector) ReportUpstreamStatus(upstream *Upstream, upstreamStatu
 	case OK:
 		adjustWeight(upstream, 1)
 	}
+	ls.updateCachedWeights()
 }
 
 func (ls *LVSWRRSelector) ReportWeights(ctx context.Context) {
