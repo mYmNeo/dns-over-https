@@ -27,7 +27,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -80,7 +79,7 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	r.Id = requestID
 	requestBase64 := base64.RawURLEncoding.EncodeToString(requestBinary)
 
-	requestURL := fmt.Sprintf("%s?ct=application/dns-message&dns=%s", upstream.URL, requestBase64)
+	requestURL := upstream.URL + "?ct=application/dns-message&dns=" + requestBase64
 
 	var req *http.Request
 	if len(requestURL) < 2048 {

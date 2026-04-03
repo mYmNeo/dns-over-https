@@ -25,7 +25,6 @@ package main
 
 import (
 	"fmt"
-	"regexp"
 
 	"github.com/BurntSushi/toml"
 )
@@ -97,15 +96,25 @@ func loadConfig(path string) (*config, error) {
 	return conf, nil
 }
 
-var rxUpstreamWithTypePrefix = regexp.MustCompile("^[a-z-]+(:)")
-
+// addressAndType splits an upstream string like "udp:1.2.3.4:53" into
+// the address ("1.2.3.4:53") and transport type ("udp"). Returns empty
+// strings if the format is invalid.
 func addressAndType(us string) (string, string) {
-	p := rxUpstreamWithTypePrefix.FindStringSubmatchIndex(us)
-	if len(p) != 4 {
-		return "", ""
+	// Find the first ':' that separates the type prefix from the address.
+	// Valid prefixes contain only lowercase letters and hyphens (e.g., "udp", "tcp", "tcp-tls").
+	for i := 0; i < len(us); i++ {
+		c := us[i]
+		if c == ':' {
+			if i == 0 {
+				return "", ""
+			}
+			return us[i+1:], us[:i]
+		}
+		if !((c >= 'a' && c <= 'z') || c == '-') {
+			return "", ""
+		}
 	}
-
-	return us[p[2]+1:], us[:p[2]]
+	return "", ""
 }
 
 type configError struct {

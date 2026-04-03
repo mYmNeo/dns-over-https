@@ -289,7 +289,7 @@ func (s *Server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) findClientIP(r *http.Request) net.IP {
-	noEcs := r.URL.Query().Get("no_ecs")
+	noEcs := r.FormValue("no_ecs")
 	if strings.EqualFold(noEcs, "true") {
 		return nil
 	}
