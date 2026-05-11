@@ -175,6 +175,14 @@ func NewGFWList(urls []string, localFiles []string) (*GFWList, error) {
 		readers []io.Reader
 	)
 
+	defer func() {
+		for _, reader := range readers {
+			if closer, ok := reader.(io.Closer); ok {
+				closer.Close()
+			}
+		}
+	}()
+
 	for _, url := range urls {
 		resp, err := http.Get(url)
 		if err != nil {
