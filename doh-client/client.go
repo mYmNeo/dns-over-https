@@ -296,14 +296,14 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 		}
 	}
 
-	err = c.PrepareGFWListIPSet()
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare gfwlist: %s", err)
-	}
-
 	err = c.PrepareDNSRules()
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare dns rules: %s", err)
+	}
+
+	err = c.PrepareGFWListIPSet()
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare gfwlist: %s", err)
 	}
 
 	if c.conf.Other.GFWListURL != nil || c.conf.Other.GFWList != nil {
