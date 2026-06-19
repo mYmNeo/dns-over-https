@@ -299,14 +299,15 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 		}
 	}
 
-	err = c.PrepareDNSRules()
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare dns rules: %s", err)
-	}
-
-	err = c.PrepareGFWListIPSet()
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare gfwlist: %s", err)
+	if c.conf.Other.LocalInterfaceName != "" {
+		if err := c.PrepareDNSRules(); err != nil {
+			log.Printf("Warning: failed to prepare DNS rules: %v\n", err)
+		}
+		if c.conf.Other.GFWListURL != nil || c.conf.Other.GFWList != nil {
+			if err := c.PrepareGFWListIPSet(); err != nil {
+				log.Printf("Warning: failed to prepare GFW ipset: %v\n", err)
+			}
+		}
 	}
 
 	if c.conf.Other.GFWListURL != nil || c.conf.Other.GFWList != nil {
@@ -544,27 +545,14 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	}
 
 	gfwBlocked := c.isGFWBlocked(questionName)
-	if !gfwBlocked {
-		numServers := len(c.bootstrap)
-		upstream := c.bootstrap[rand.Intn(numServers)]
-		log.Printf("Request \"%s %s %s\" is passed through %s.\n", questionName, questionClass, questionType, upstream)
-		var reply *dns.Msg
-		var err error
-		if !isTCP {
-			reply, _, err = c.udpClient.Exchange(r, upstream)
-		} else {
-			reply, _, err = c.tcpClient.Exchange(r, upstream)
-		}
-		if err == nil {
-			c.recordResponse(reply)
-			w.WriteMsg(reply)
+	useBootstrap := c.isPassthrough(questionName)
+	if c.gfwList != nil && !gfwBlocked {
+		useBootstrap = true
+	}
+	if useBootstrap {
+		if c.exchangeViaBootstrap(w, r, isTCP, questionName, questionClass, questionType) {
 			return
 		}
-		log.Println(err)
-		reply = jsondns.PrepareReply(r)
-		reply.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(reply)
-		return
 	}
 
 	upstream := c.selector.Get()
@@ -740,6 +728,47 @@ func (c *Client) isGFWBlocked(domain string) bool {
 	return c.gfwList != nil && c.gfwList.IsBlockedByGFW(strings.TrimSuffix(domain, "."))
 }
 
+func (c *Client) isPassthrough(domain string) bool {
+	if len(c.passthrough) == 0 {
+		return false
+	}
+	domain = strings.ToLower(domain)
+	if !strings.HasSuffix(domain, ".") {
+		domain += "."
+	}
+	for _, pt := range c.passthrough {
+		if strings.HasSuffix(domain, pt) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) exchangeViaBootstrap(w dns.ResponseWriter, r *dns.Msg, isTCP bool, questionName, questionClass, questionType string) bool {
+	if len(c.bootstrap) == 0 {
+		return false
+	}
+	upstream := c.bootstrap[rand.Intn(len(c.bootstrap))]
+	log.Printf("Request \"%s %s %s\" is passed through %s.\n", questionName, questionClass, questionType, upstream)
+	var reply *dns.Msg
+	var err error
+	if !isTCP {
+		reply, _, err = c.udpClient.Exchange(r, upstream)
+	} else {
+		reply, _, err = c.tcpClient.Exchange(r, upstream)
+	}
+	if err == nil {
+		c.recordResponse(reply)
+		w.WriteMsg(reply)
+		return true
+	}
+	log.Println(err)
+	reply = jsondns.PrepareReply(r)
+	reply.Rcode = dns.RcodeServerFailure
+	w.WriteMsg(reply)
+	return true
+}
+
 func (c *Client) isBlocked(domain string) bool {
 	c.gfwLock.RLock()
 	defer c.gfwLock.RUnlock()
@@ -913,6 +942,9 @@ func GetIPFromInterface(iferName string) (string, error) {
 }
 
 func GetRouteTable(ifName string) (string, error) {
+	if ifName == "" {
+		return "", fmt.Errorf("interface name is empty")
+	}
 	// Get system routing rules
 	routeFile, err := os.Open("/proc/net/route")
 	if err != nil {
@@ -927,28 +959,38 @@ func GetRouteTable(ifName string) (string, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Fields(line)
-		if len(fields) >= 3 {
-			iface := fields[0]
-			destHex := fields[1]
-			maskHex := fields[7]
-
-			if iface != ifName {
-				continue
-			}
-
-			// Convert hex to IP address
-			dest, _ := hex.DecodeString(destHex)
-			mask, _ := hex.DecodeString(maskHex)
-			cidr := net.IPNet{
-				IP:   net.IPv4(dest[3], dest[2], dest[1], dest[0]),
-				Mask: net.IPv4Mask(mask[3], mask[2], mask[1], mask[0]),
-			}
-
-			return cidr.String(), nil
+		if len(fields) < 8 {
+			continue
 		}
+		iface := fields[0]
+		destHex := fields[1]
+		maskHex := fields[7]
+
+		if iface != ifName {
+			continue
+		}
+
+		dest, err := hex.DecodeString(destHex)
+		if err != nil || len(dest) < 4 {
+			continue
+		}
+		mask, err := hex.DecodeString(maskHex)
+		if err != nil || len(mask) < 4 {
+			continue
+		}
+		cidr := net.IPNet{
+			IP:   net.IPv4(dest[3], dest[2], dest[1], dest[0]),
+			Mask: net.IPv4Mask(mask[3], mask[2], mask[1], mask[0]),
+		}
+
+		return cidr.String(), nil
 	}
 
-	return "", nil
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("failed to read route file: %v", err)
+	}
+
+	return "", fmt.Errorf("no route found for interface %q", ifName)
 }
 
 func (c *Client) cleanRules() {

@@ -248,8 +248,8 @@ func (s *Store) Put(msg *dns.Msg) {
 	}
 
 	domain := strings.ToLower(strings.TrimSuffix(q.Name, "."))
-	if len(domain) > domainMax {
-		domain = domain[:domainMax]
+	if len(domain) >= domainMax {
+		domain = domain[:domainMax-1]
 	}
 	expiresAt := uint64(time.Now().Unix()) + uint64(minTTL)
 
@@ -275,8 +275,8 @@ func (s *Store) Put(msg *dns.Msg) {
 		sl.family = writeIP(&sl.ip, ip)
 		sl.qtype = q.Qtype
 		sl.expiresAt = expiresAt
-		copy(sl.domain[:], domain)
-		sl.domain[len(domain)] = 0
+		n := copy(sl.domain[:], domain)
+		sl.domain[n] = 0
 	}
 	s.seqEndWrite()
 }

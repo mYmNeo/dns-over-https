@@ -5,6 +5,7 @@ package shmmap
 import (
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -125,6 +126,30 @@ func TestOpenReadOnly(t *testing.T) {
 	domain, ok := reader.Lookup(parseIP("10.0.0.3"))
 	if !ok || domain != "readonly.example.com" {
 		t.Fatalf("Lookup = %q, ok = %v", domain, ok)
+	}
+}
+
+func TestLongDomain(t *testing.T) {
+	name := "/doh-shm-test-long-domain"
+	size := uint(headerSize + slotSize*64)
+
+	store, err := Open(name, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	defer unixUnlink(name)
+
+	longName := strings.Repeat("a", 300) + ".example.com"
+	msg := newTestMsg(longName+".", dns.TypeA, []string{"10.0.0.4"})
+	store.Put(msg)
+
+	domain, ok := store.Lookup(parseIP("10.0.0.4"))
+	if !ok {
+		t.Fatal("expected lookup hit")
+	}
+	if len(domain) >= domainMax {
+		t.Fatalf("domain length = %d, want <%d", len(domain), domainMax)
 	}
 }
 
