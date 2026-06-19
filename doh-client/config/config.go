@@ -68,6 +68,9 @@ type others struct {
 	LocalInterfaceName    string   `toml:"local_ifname"`
 	ProxyPort             int      `toml:"proxy_port"`
 	IPTablesPath          string   `toml:"iptables_path"`
+	DNSShmEnabled         bool     `toml:"dns_shm_enabled"`
+	DNSShmName            string   `toml:"dns_shm_name"`
+	DNSShmSize            uint     `toml:"dns_shm_size"`
 }
 
 type Config struct {
@@ -94,6 +97,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if conf.Other.Timeout == 0 {
 		conf.Other.Timeout = 10
+	}
+	if conf.Other.DNSShmName == "" {
+		conf.Other.DNSShmName = "/doh-client-dns-map"
+	}
+	if conf.Other.DNSShmSize == 0 {
+		conf.Other.DNSShmSize = 4 * 1024 * 1024
 	}
 
 	if conf.Upstream.UpstreamSelector == "" {

@@ -113,6 +113,35 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 	return buf, true
 }
 
+// peekMsg returns a cloned cached message if the entry exists and is not expired.
+func (qc *queryCache) peekMsg(name string, qtype, qclass uint16) (*dns.Msg, bool) {
+	key := cacheKey{
+		Name:   name,
+		Qtype:  qtype,
+		Qclass: qclass,
+	}
+
+	qc.mu.RLock()
+	entry, found := qc.entries[key]
+	qc.mu.RUnlock()
+
+	if !found {
+		return nil, false
+	}
+
+	elapsed := time.Since(entry.storedAt)
+	if elapsed >= entry.ttl {
+		qc.mu.Lock()
+		if e, ok := qc.entries[key]; ok && e.storedAt.Equal(entry.storedAt) {
+			delete(qc.entries, key)
+		}
+		qc.mu.Unlock()
+		return nil, false
+	}
+
+	return entry.msg.Copy(), true
+}
+
 // put stores a DNS response in the cache. Only caches successful responses
 // (Rcode == 0) with at least one answer and a positive minimum TTL.
 func (qc *queryCache) put(msg *dns.Msg) {
