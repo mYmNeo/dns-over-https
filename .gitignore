@@ -6,6 +6,7 @@
 darwin-wrapper/doh-logger
 doh-client/doh-client
 doh-server/doh-server
+doh-ip-lookup/doh-ip-lookup
 
 # Test binary, build with `go test -c`
 *.test

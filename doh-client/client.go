@@ -38,6 +38,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,7 @@ import (
 
 	"github.com/m13253/dns-over-https/v2/doh-client/config"
 	"github.com/m13253/dns-over-https/v2/doh-client/selector"
+	"github.com/m13253/dns-over-https/v2/doh-client/shmmap"
 	jsondns "github.com/m13253/dns-over-https/v2/json-dns"
 )
 
@@ -75,6 +77,7 @@ type Client struct {
 	bootstrap            []string
 	routerRules          RouterRules
 	cache                *queryCache
+	shmStore             *shmmap.Store
 }
 
 type DNSRequest struct {
@@ -326,6 +329,18 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 		c.blockList = blockList
 	}
 
+	if conf.Other.DNSShmEnabled && runtime.GOOS == "linux" {
+		store, err := shmmap.Open(conf.Other.DNSShmName, conf.Other.DNSShmSize)
+		if err != nil {
+			log.Printf("Warning: failed to open DNS shared memory map: %v\n", err)
+		} else {
+			c.shmStore = store
+			if conf.Other.Verbose {
+				log.Printf("DNS shared memory map enabled: %s\n", conf.Other.DNSShmName)
+			}
+		}
+	}
+
 	return c, nil
 }
 
@@ -469,6 +484,9 @@ func (c *Client) Start() error {
 	_ = cancel // caller can use this to stop health-check goroutines
 	c.selector.StartEvaluate(ctx)
 	c.cache.startCleanup(ctx)
+	if c.shmStore != nil {
+		c.shmStore.StartCleanup(ctx)
+	}
 
 	for i := 0; i < cap(results); i++ {
 		err := <-results
@@ -522,6 +540,9 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 		if c.conf.Other.Verbose {
 			log.Printf("cache hit: %s %s %s\n", questionName, questionClass, questionType)
 		}
+		if msg, ok := c.cache.peekMsg(questionName, question.Qtype, question.Qclass); ok {
+			c.recordResponse(msg)
+		}
 		w.Write(buf)
 		return
 	}
@@ -539,6 +560,7 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 			reply, _, err = c.tcpClient.Exchange(r, upstream)
 		}
 		if err == nil {
+			c.recordResponse(reply)
 			w.WriteMsg(reply)
 			return
 		}
@@ -621,6 +643,7 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 
 	if fullReply != nil {
 		c.cache.put(fullReply)
+		c.recordResponse(fullReply)
 	}
 
 	// https://developers.cloudflare.com/1.1.1.1/dns-over-https/request-structure/ says
@@ -645,6 +668,13 @@ func (c *Client) udpHandlerFunc(w dns.ResponseWriter, r *dns.Msg) {
 
 func (c *Client) tcpHandlerFunc(w dns.ResponseWriter, r *dns.Msg) {
 	c.handlerFunc(w, r, true)
+}
+
+func (c *Client) recordResponse(msg *dns.Msg) {
+	if c.shmStore == nil || msg == nil {
+		return
+	}
+	c.shmStore.Put(msg)
 }
 
 func (c *Client) findClientIP(w dns.ResponseWriter, r *dns.Msg) (ednsClientAddress net.IP, ednsClientNetmask uint8) {
