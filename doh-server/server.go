@@ -29,7 +29,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -347,7 +347,7 @@ func (s *Server) indexQuestionType(msg *dns.Msg, qtype uint16) int {
 func (s *Server) doDNSQuery(ctx context.Context, req *DNSRequest) (err error) {
 	numServers := len(s.conf.Upstream)
 	for i := uint(0); i < s.conf.Tries; i++ {
-		req.currentUpstream = s.conf.Upstream[rand.Intn(numServers)]
+		req.currentUpstream = s.conf.Upstream[rand.IntN(numServers)]
 
 		upstream, t := addressAndType(req.currentUpstream)
 
@@ -365,7 +365,7 @@ func (s *Server) doDNSQuery(ctx context.Context, req *DNSRequest) (err error) {
 			} else {
 				req.response, _, err = s.udpClient.ExchangeContext(ctx, req.request, upstream)
 				if err == nil && req.response != nil && req.response.Truncated {
-					log.Println(err)
+					log.Println("UDP response truncated, retrying with TCP")
 					req.response, _, err = s.tcpClient.ExchangeContext(ctx, req.request, upstream)
 				}
 

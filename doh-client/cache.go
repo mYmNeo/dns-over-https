@@ -62,7 +62,9 @@ func newQueryCache() *queryCache {
 
 // get looks up a cached DNS response. It checks expiry, adjusts TTLs downward
 // by elapsed time, sets the correct request ID, and returns packed wire bytes.
-func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, isTCP bool, udpSize uint16) ([]byte, bool) {
+// The cloned message is also returned so callers can inspect answer IPs
+// without a second lookup.
+func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, isTCP bool, udpSize uint16) ([]byte, *dns.Msg, bool) {
 	key := cacheKey{
 		Name:   name,
 		Qtype:  qtype,
@@ -74,7 +76,7 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 	qc.mu.RUnlock()
 
 	if !found {
-		return nil, false
+		return nil, nil, false
 	}
 
 	elapsed := time.Since(entry.storedAt)
@@ -86,7 +88,7 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 			delete(qc.entries, key)
 		}
 		qc.mu.Unlock()
-		return nil, false
+		return nil, nil, false
 	}
 
 	// Clone the message so we don't mutate the cached copy
@@ -107,39 +109,10 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 	buf, err := clone.Pack()
 	if err != nil {
 		log.Printf("cache: failed to pack cached response: %v\n", err)
-		return nil, false
+		return nil, nil, false
 	}
 
-	return buf, true
-}
-
-// peekMsg returns a cloned cached message if the entry exists and is not expired.
-func (qc *queryCache) peekMsg(name string, qtype, qclass uint16) (*dns.Msg, bool) {
-	key := cacheKey{
-		Name:   name,
-		Qtype:  qtype,
-		Qclass: qclass,
-	}
-
-	qc.mu.RLock()
-	entry, found := qc.entries[key]
-	qc.mu.RUnlock()
-
-	if !found {
-		return nil, false
-	}
-
-	elapsed := time.Since(entry.storedAt)
-	if elapsed >= entry.ttl {
-		qc.mu.Lock()
-		if e, ok := qc.entries[key]; ok && e.storedAt.Equal(entry.storedAt) {
-			delete(qc.entries, key)
-		}
-		qc.mu.Unlock()
-		return nil, false
-	}
-
-	return entry.msg.Copy(), true
+	return buf, clone, true
 }
 
 // put stores a DNS response in the cache. Only caches successful responses
@@ -178,11 +151,13 @@ func (qc *queryCache) put(msg *dns.Msg) {
 	}
 
 	qc.mu.Lock()
-	// Enforce maximum cache size to bound memory growth
+	// Evict a random entry if the cache is full and this key is new
 	if len(qc.entries) >= qc.maxEntries {
 		if _, exists := qc.entries[key]; !exists {
-			qc.mu.Unlock()
-			return
+			for k := range qc.entries {
+				delete(qc.entries, k)
+				break
+			}
 		}
 	}
 	qc.entries[key] = entry

@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var GFWListURL = "https://gitlab.com/gfwlist/gfwlist/raw/master/gfwlist.txt"
@@ -56,8 +57,10 @@ type gfwListRule interface {
 }
 
 type GFWList struct {
-	ruleMap  map[string]gfwListRule
-	ruleList []gfwListRule
+	ruleMap        map[string]gfwListRule
+	ruleList       []gfwListRule
+	blockedCache   map[string]bool
+	blockedCacheMu sync.RWMutex
 }
 
 func (gfw *GFWList) FastMatchDomain(domain string) (bool, bool) {
@@ -95,34 +98,60 @@ func (gfw *GFWList) FastMatchDomain(domain string) (bool, bool) {
 }
 
 func (gfw *GFWList) IsBlockedByGFW(domain string) bool {
+	// Check the bounded memoization cache first
+	gfw.blockedCacheMu.RLock()
+	if blocked, ok := gfw.blockedCache[domain]; ok {
+		gfw.blockedCacheMu.RUnlock()
+		return blocked
+	}
+	gfw.blockedCacheMu.RUnlock()
+
 	fastMatchResult, exist := gfw.FastMatchDomain(domain)
 	if exist {
+		gfw.cacheBlocked(domain, fastMatchResult)
 		return fastMatchResult
 	}
 
 	for _, rule := range gfw.ruleList {
 		if rule.match(domain) {
 			if _, ok := rule.(*whiteListRule); ok {
+				gfw.cacheBlocked(domain, false)
 				return false
 			}
+			gfw.cacheBlocked(domain, true)
 			return true
 		}
 	}
+	gfw.cacheBlocked(domain, false)
 	return false
+}
+
+const maxBlockedCache = 100_000
+
+func (gfw *GFWList) cacheBlocked(domain string, blocked bool) {
+	gfw.blockedCacheMu.Lock()
+	if gfw.blockedCache == nil {
+		gfw.blockedCache = make(map[string]bool)
+	} else if len(gfw.blockedCache) >= maxBlockedCache {
+		// Clear the cache when it grows too large
+		gfw.blockedCache = make(map[string]bool)
+	}
+	gfw.blockedCache[domain] = blocked
+	gfw.blockedCacheMu.Unlock()
 }
 
 func Parse(rules string) (*GFWList, error) {
 	reader := bufio.NewReader(strings.NewReader(rules))
 	gfw := new(GFWList)
 	gfw.ruleMap = make(map[string]gfwListRule)
-	//i := 0
+	// i := 0
 	for {
 		line, _, err := reader.ReadLine()
 		if nil != err {
 			break
 		}
 		str := strings.TrimSpace(string(line))
-		//comment
+		// comment
 		if strings.HasPrefix(str, "!") || len(str) == 0 || strings.HasPrefix(str, "[") {
 			continue
 		}
@@ -171,9 +200,7 @@ func Parse(rules string) (*GFWList, error) {
 }
 
 func NewGFWList(urls []string, localFiles []string) (*GFWList, error) {
-	var (
-		readers []io.Reader
-	)
+	var readers []io.Reader
 
 	defer func() {
 		for _, reader := range readers {

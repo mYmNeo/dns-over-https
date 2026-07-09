@@ -2,13 +2,8 @@ package selector
 
 import (
 	"context"
-	"math/rand"
-	"time"
+	"math/rand/v2"
 )
-
-func init() {
-	rand.NewSource(time.Now().UnixNano())
-}
 
 type RandomSelector struct {
 	upstreams []*Upstream
@@ -28,7 +23,7 @@ func (rs *RandomSelector) Add(url string, upstreamType UpstreamType) (err error)
 }
 
 func (rs *RandomSelector) Get() *Upstream {
-	return rs.upstreams[rand.Intn(len(rs.upstreams))]
+	return rs.upstreams[rand.IntN(len(rs.upstreams))]
 }
 
 func (rs *RandomSelector) StartEvaluate(ctx context.Context) {}
