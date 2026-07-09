@@ -31,7 +31,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -78,6 +78,7 @@ type Client struct {
 	routerRules          RouterRules
 	cache                *queryCache
 	shmStore             *shmmap.Store
+	ipsetCh              chan string
 }
 
 type DNSRequest struct {
@@ -96,8 +97,9 @@ const (
 
 func NewClient(conf *config.Config) (c *Client, err error) {
 	c = &Client{
-		conf:  conf,
-		cache: newQueryCache(),
+		conf:    conf,
+		cache:   newQueryCache(),
+		ipsetCh: make(chan string, 256),
 	}
 
 	udpHandler := dns.HandlerFunc(c.udpHandlerFunc)
@@ -197,7 +199,7 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 					}
 				}
 				numServers := len(c.bootstrap)
-				bootstrap := c.bootstrap[rand.Intn(numServers)]
+				bootstrap := c.bootstrap[rand.IntN(numServers)]
 				conn, err := d.DialContext(ctx, network, bootstrap)
 				return conn, err
 			},
@@ -484,6 +486,9 @@ func (c *Client) Start() error {
 	if c.shmStore != nil {
 		c.shmStore.StartCleanup(ctx)
 	}
+	if c.ipsetCh != nil {
+		c.startIPSetFlusher()
+	}
 
 	for i := 0; i < cap(results); i++ {
 		err := <-results
@@ -519,8 +524,8 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	if c.conf.Other.Verbose {
 		fmt.Printf("%s - - [%s] \"%s %s %s\"\n", w.RemoteAddr(), time.Now().Format("02/Jan/2006:15:04:05 -0700"), questionName, questionClass, questionType)
 	}
-
-	if c.isBlocked(questionName) {
+	isBlocked, gfwBlocked := c.checkLists(questionName)
+	if isBlocked {
 		log.Println("Blocked:", questionName)
 		reply := jsondns.PrepareReply(r)
 		reply.Rcode = dns.RcodeRefused
@@ -533,18 +538,15 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	if opt := r.IsEdns0(); opt != nil {
 		udpSize = opt.UDPSize()
 	}
-	if buf, ok := c.cache.get(questionName, question.Qtype, question.Qclass, r.Id, isTCP, udpSize); ok {
+	if buf, msg, ok := c.cache.get(questionName, question.Qtype, question.Qclass, r.Id, isTCP, udpSize); ok {
 		if c.conf.Other.Verbose {
 			log.Printf("cache hit: %s %s %s\n", questionName, questionClass, questionType)
 		}
-		if msg, ok := c.cache.peekMsg(questionName, question.Qtype, question.Qclass); ok {
-			c.recordResponse(msg)
-		}
+		c.recordResponse(msg)
 		w.Write(buf)
 		return
 	}
 
-	gfwBlocked := c.isGFWBlocked(questionName)
 	useBootstrap := c.isPassthrough(questionName)
 	if c.gfwList != nil && !gfwBlocked {
 		useBootstrap = true
@@ -676,12 +678,15 @@ func (c *Client) findClientIP(w dns.ResponseWriter, r *dns.Msg) (ednsClientAddre
 			}
 		}
 	}
-	remoteAddr, err := net.ResolveUDPAddr("udp", w.RemoteAddr().String())
-	if err != nil {
-		return
-	}
-	if ip := remoteAddr.IP; jsondns.IsGlobalIP(ip) {
-		_, ednsClientNetmask, ednsClientAddress = jsondns.GetEDNSClientInfo(ip, false)
+	switch addr := w.RemoteAddr().(type) {
+	case *net.UDPAddr:
+		if ip := addr.IP; jsondns.IsGlobalIP(ip) {
+			_, ednsClientNetmask, ednsClientAddress = jsondns.GetEDNSClientInfo(ip, false)
+		}
+	case *net.TCPAddr:
+		if ip := addr.IP; jsondns.IsGlobalIP(ip) {
+			_, ednsClientNetmask, ednsClientAddress = jsondns.GetEDNSClientInfo(ip, false)
+		}
 	}
 	return
 }
@@ -721,11 +726,13 @@ func (c *Client) getInterfaceIPs() (v4, v6 net.IP, err error) {
 	return v4, v6, nil
 }
 
-func (c *Client) isGFWBlocked(domain string) bool {
+func (c *Client) checkLists(domain string) (isBlocked, isGFWBlocked bool) {
 	c.gfwLock.RLock()
 	defer c.gfwLock.RUnlock()
-
-	return c.gfwList != nil && c.gfwList.IsBlockedByGFW(strings.TrimSuffix(domain, "."))
+	domain = strings.TrimSuffix(domain, ".")
+	isBlocked = c.blockList != nil && c.blockList.IsBlockedByGFW(domain)
+	isGFWBlocked = c.gfwList != nil && c.gfwList.IsBlockedByGFW(domain)
+	return
 }
 
 func (c *Client) isPassthrough(domain string) bool {
@@ -748,7 +755,7 @@ func (c *Client) exchangeViaBootstrap(w dns.ResponseWriter, r *dns.Msg, isTCP bo
 	if len(c.bootstrap) == 0 {
 		return false
 	}
-	upstream := c.bootstrap[rand.Intn(len(c.bootstrap))]
+	upstream := c.bootstrap[rand.IntN(len(c.bootstrap))]
 	log.Printf("Request \"%s %s %s\" is passed through %s.\n", questionName, questionClass, questionType, upstream)
 	var reply *dns.Msg
 	var err error
@@ -769,26 +776,51 @@ func (c *Client) exchangeViaBootstrap(w dns.ResponseWriter, r *dns.Msg, isTCP bo
 	return true
 }
 
-func (c *Client) isBlocked(domain string) bool {
-	c.gfwLock.RLock()
-	defer c.gfwLock.RUnlock()
-
-	return c.blockList != nil && c.blockList.IsBlockedByGFW(strings.TrimSuffix(domain, "."))
-}
-
 func (c *Client) AddGFWFilterIP(answers []dns.RR) {
 	// Collect all IPv4 addresses from answer records
-	var ips []string
 	for _, ans := range answers {
 		if rr, ok := ans.(*dns.A); ok {
-			ips = append(ips, rr.A.String())
+			select {
+			case c.ipsetCh <- rr.A.String():
+			default:
+				// channel full, drop — flusher will catch up
+			}
 		}
 	}
-	if len(ips) == 0 {
-		return
-	}
+}
 
-	// Batch add IPs using ipset restore via stdin pipe
+func (c *Client) startIPSetFlusher() {
+	go func() {
+		var ips []string
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case ip := <-c.ipsetCh:
+				ips = append(ips, ip)
+				// Drain any additional queued IPs without blocking
+				for len(ips) < 128 {
+					select {
+					case ip := <-c.ipsetCh:
+						ips = append(ips, ip)
+					default:
+						goto flush
+					}
+				}
+			flush:
+				c.flushIPSet(ips)
+				ips = ips[:0]
+			case <-ticker.C:
+				if len(ips) > 0 {
+					c.flushIPSet(ips)
+					ips = ips[:0]
+				}
+			}
+		}
+	}()
+}
+
+func (c *Client) flushIPSet(ips []string) {
 	cmd := exec.Command("ipset", "restore")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -802,10 +834,6 @@ func (c *Client) AddGFWFilterIP(answers []dns.RR) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Println("Failed to add IPs to ipset via restore", "output", string(out), "error", err)
-	} else {
-		for _, ip := range ips {
-			log.Println("Added IPv4 to GFW filter", "ip", ip)
-		}
 	}
 }
 
