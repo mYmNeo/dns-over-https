@@ -29,7 +29,7 @@ func NewLVSWRRSelector(timeout time.Duration) *LVSWRRSelector {
 
 func (ls *LVSWRRSelector) Add(url string, upstreamType UpstreamType, weight int32) (err error) {
 	if weight < 1 {
-		return errors.New("weight is 1")
+		return errors.New("weight must be >= 1")
 	}
 
 	upstream, err := NewUpstream(upstreamType, url, weight)
@@ -60,6 +60,9 @@ func (ls *LVSWRRSelector) StartEvaluate(ctx context.Context) {
 }
 
 func (ls *LVSWRRSelector) Get() *Upstream {
+	if len(ls.upstreams) == 0 {
+		return nil
+	}
 	if len(ls.upstreams) == 1 {
 		return ls.upstreams[0]
 	}
@@ -67,29 +70,56 @@ func (ls *LVSWRRSelector) Get() *Upstream {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
 
-	for {
+	// Snapshot effective weights and cached values under lock
+	cachedGCD := ls.cachedGCD
+	cachedMax := ls.cachedMax
+	currentWeight := ls.currentWeight
+
+	// Guard: if cachedMax is 0, recompute to avoid panic
+	if cachedMax == 0 {
+		ls.updateCachedWeightsLocked()
+		cachedGCD = ls.cachedGCD
+		cachedMax = ls.cachedMax
+	}
+
+	for round := int32(0); round < int32(len(ls.upstreams))*2; round++ {
 		ls.lastChoose = (ls.lastChoose + 1) % int32(len(ls.upstreams))
 
 		if ls.lastChoose == 0 {
-			ls.currentWeight -= ls.cachedGCD
-
-			if ls.currentWeight <= 0 {
-				ls.currentWeight = ls.cachedMax
-
-				if ls.currentWeight == 0 {
-					panic("current weight is 0")
-				}
+			currentWeight -= cachedGCD
+			if currentWeight <= 0 {
+				currentWeight = cachedMax
 			}
 		}
 
-		if atomic.LoadInt32(&ls.upstreams[ls.lastChoose].effectiveWeight) >= ls.currentWeight {
+		if atomic.LoadInt32(&ls.upstreams[ls.lastChoose].effectiveWeight) >= currentWeight {
+			ls.currentWeight = currentWeight
 			return ls.upstreams[ls.lastChoose]
 		}
 	}
+
+	// Fallback: return the upstream with maximum effective weight
+	var best *Upstream
+	var bestW int32
+	for _, u := range ls.upstreams {
+		w := atomic.LoadInt32(&u.effectiveWeight)
+		if w > bestW {
+			bestW = w
+			best = u
+		}
+	}
+	return best
 }
 
-// updateCachedWeights recomputes and caches the GCD and max weight values.
+// updateCachedWeights recomputes and caches the GCD and max weight values under lock.
 func (ls *LVSWRRSelector) updateCachedWeights() {
+	ls.mu.Lock()
+	ls.updateCachedWeightsLocked()
+	ls.mu.Unlock()
+}
+
+// updateCachedWeightsLocked recomputes cached GCD and max. Caller MUST hold ls.mu.
+func (ls *LVSWRRSelector) updateCachedWeightsLocked() {
 	if len(ls.upstreams) < 2 {
 		if len(ls.upstreams) == 1 {
 			w := atomic.LoadInt32(&ls.upstreams[0].effectiveWeight)
@@ -112,10 +142,8 @@ func (ls *LVSWRRSelector) updateCachedWeights() {
 		}
 	}
 
-	ls.mu.Lock()
 	ls.cachedGCD = gcdVal
 	ls.cachedMax = maxVal
-	ls.mu.Unlock()
 }
 
 func gcd(x, y int32) int32 {

@@ -3,12 +3,14 @@
 package shmmap
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -22,6 +24,7 @@ type Store struct {
 	name string
 	path string
 	data []byte
+	mu   sync.Mutex
 }
 
 func shmPath(name string) (string, error) {
@@ -45,7 +48,7 @@ func Open(name string, size uint) (*Store, error) {
 		return nil, err
 	}
 
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT, 0o666)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("shmmap: open %s: %w", path, err)
 	}
@@ -105,9 +108,12 @@ func (s *Store) initHeader() {
 	if string(h.magic[:8]) != magic {
 		copy(h.magic[:], magic)
 		h.version = version
-		h.slotCount = (uint32(len(s.data)) - headerSize) / slotSize
 		h.seq = 0
 	}
+	// Always recompute slotCount from the actual mapping size —
+	// the shared memory file persists across restarts and may have
+	// been created with a different DNSShmSize.
+	h.slotCount = (uint32(len(s.data)) - headerSize) / slotSize
 }
 
 func (s *Store) validateHeader() error {
@@ -189,13 +195,13 @@ func ipEqual(slotIP *[16]byte, family uint8, ip net.IP) bool {
 		if v4 == nil {
 			return false
 		}
-		return string(slotIP[:4]) == string(v4)
+		return bytes.Equal(slotIP[:4], v4)
 	}
 	ip16 := ip.To16()
 	if ip16 == nil {
 		return false
 	}
-	return string(slotIP[:16]) == string(ip16)
+	return bytes.Equal(slotIP[:16], ip16)
 }
 
 func (s *Store) findSlot(ip net.IP, forWrite bool) *slot {
@@ -266,6 +272,11 @@ func (s *Store) Put(msg *dns.Msg) {
 		return
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data == nil {
+		return
+	}
 	s.seqBeginWrite()
 	for _, ip := range ips {
 		sl := s.findSlot(ip, true)
@@ -284,6 +295,9 @@ func (s *Store) Put(msg *dns.Msg) {
 // Lookup returns the domain name for an IP address, or empty string if not found.
 func (s *Store) Lookup(ip net.IP) (string, bool) {
 	if ip == nil {
+		return "", false
+	}
+	if s.data == nil {
 		return "", false
 	}
 	now := uint64(time.Now().Unix())
@@ -333,6 +347,12 @@ func (s *Store) StartCleanup(ctx context.Context) {
 
 func (s *Store) cleanup() {
 	now := uint64(time.Now().Unix())
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data == nil {
+		return
+	}
 	h := s.header()
 	count := h.slotCount
 
@@ -350,6 +370,8 @@ func (s *Store) cleanup() {
 
 // Close unmaps the shared memory region.
 func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.data == nil {
 		return nil
 	}

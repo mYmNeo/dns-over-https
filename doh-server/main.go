@@ -28,13 +28,15 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"runtime"
 	"strconv"
+	"syscall"
 )
 
 func checkPIDFile(pidFile string) (bool, error) {
 retry:
-	f, err := os.OpenFile(pidFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	f, err := os.OpenFile(pidFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if os.IsExist(err) {
 		pidStr, err := os.ReadFile(pidFile)
 		if err != nil {
@@ -112,5 +114,18 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	_ = server.Start()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-c
+		server.Shutdown()
+		if pidFile != nil && *pidFile != "" {
+			os.Remove(*pidFile)
+		}
+		os.Exit(0)
+	}()
+	if err := server.Start(); err != nil {
+		log.Fatalln(err)
+	}
+	select {}
 }

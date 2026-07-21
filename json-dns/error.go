@@ -38,8 +38,12 @@ type dnsError struct {
 
 func FormatError(w http.ResponseWriter, comment string, errcode int) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	status := uint32(dns.RcodeServerFailure)
+	if errcode == 400 || errcode == 415 {
+		status = dns.RcodeFormatError
+	}
 	errJSON := dnsError{
-		Status:  dns.RcodeServerFailure,
+		Status:  status,
 		Comment: comment,
 	}
 	errStr, err := json.Marshal(errJSON)
