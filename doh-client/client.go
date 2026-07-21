@@ -78,6 +78,8 @@ type Client struct {
 	routerRules          RouterRules
 	cache                *queryCache
 	shmStore             *shmmap.Store
+	cancel               context.CancelFunc
+	shutdownOnce         sync.Once
 	ipsetCh              chan string
 }
 
@@ -172,7 +174,7 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 						log.Printf("Bootstrap dial warning: %v", err)
 					} else {
 						numServers := len(c.bootstrap)
-						bootstrap := c.bootstrap[rand.Intn(numServers)]
+						bootstrap := c.bootstrap[rand.IntN(numServers)]
 						host, _, _ := net.SplitHostPort(bootstrap)
 						ip := net.ParseIP(host)
 						if ip != nil {
@@ -204,14 +206,15 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 				return conn, err
 			},
 		}
-		if len(conf.Other.Passthrough) != 0 {
-			c.passthrough = make([]string, len(conf.Other.Passthrough))
-			for i, passthrough := range conf.Other.Passthrough {
-				if punycode, err := idna.ToASCII(passthrough); err != nil {
-					passthrough = punycode
-				}
-				c.passthrough[i] = "." + strings.ToLower(strings.Trim(passthrough, ".")) + "."
+	}
+
+	if len(conf.Other.Passthrough) != 0 {
+		c.passthrough = make([]string, len(conf.Other.Passthrough))
+		for i, passthrough := range conf.Other.Passthrough {
+			if punycode, err := idna.ToASCII(passthrough); err == nil {
+				passthrough = punycode
 			}
+			c.passthrough[i] = "." + strings.ToLower(strings.Trim(passthrough, ".")) + "."
 		}
 	}
 	// Most CDNs require Cookie support to prevent DDoS attack.
@@ -375,7 +378,7 @@ func (c *Client) newHTTPClient() error {
 
 		clientCA, err := os.ReadFile(c.conf.Other.TLSClientAuthCA)
 		if err != nil {
-			log.Fatalf("Reading certificate for client authentication has failed: %v", err)
+			return fmt.Errorf("reading certificate for client authentication has failed: %v", err)
 		}
 		clientCAPool := x509.NewCertPool()
 		clientCAPool.AppendCertsFromPEM(clientCA)
@@ -480,7 +483,7 @@ func (c *Client) Start() error {
 
 	// start evaluation loop
 	ctx, cancel := context.WithCancel(context.Background())
-	_ = cancel // caller can use this to stop health-check goroutines
+	c.cancel = cancel
 	c.selector.StartEvaluate(ctx)
 	c.cache.startCleanup(ctx)
 	if c.shmStore != nil {
@@ -588,7 +591,6 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	}
 
 	// if req.err == nil, req.response != nil
-	defer req.response.Body.Close()
 
 	for _, header := range c.conf.Other.DebugHTTPHeaders {
 		if value := req.response.Header.Get(header); value != "" {
@@ -738,10 +740,6 @@ func (c *Client) checkLists(domain string) (isBlocked, isGFWBlocked bool) {
 func (c *Client) isPassthrough(domain string) bool {
 	if len(c.passthrough) == 0 {
 		return false
-	}
-	domain = strings.ToLower(domain)
-	if !strings.HasSuffix(domain, ".") {
-		domain += "."
 	}
 	for _, pt := range c.passthrough {
 		if strings.HasSuffix(domain, pt) {
@@ -1039,4 +1037,26 @@ func (c *Client) cleanRules() {
 
 	exec.Command("ipset", "flush", GFW_IPLIST).CombinedOutput()
 	exec.Command("ipset", "destroy", GFW_IPLIST).CombinedOutput()
+}
+
+// Shutdown gracefully stops the client, cancelling background goroutines,
+// closing shared memory, and draining idle HTTP connections.
+func (c *Client) Shutdown() {
+	c.shutdownOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
+		for _, srv := range c.udpServers {
+			_ = srv.Shutdown()
+		}
+		for _, srv := range c.tcpServers {
+			_ = srv.Shutdown()
+		}
+		if c.shmStore != nil {
+			c.shmStore.Close()
+		}
+		if c.httpTransport != nil {
+			c.httpTransport.CloseIdleConnections()
+		}
+	})
 }

@@ -26,6 +26,7 @@ package jsondns
 import (
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -151,18 +152,13 @@ func marshalRR(rr dns.RR, now time.Time) RR {
 	jsonRR.Expires = now.Add(time.Duration(jsonRR.TTL) * time.Second)
 	jsonRR.ExpiresStr = jsonRR.Expires.Format(time.RFC1123)
 
-	// Extract data field by scanning for the 4th tab in the RR string representation.
-	// Format: "name\tTTL\tCLASS\tTYPE\tDATA"
+	// Extract data field after the last tab in the RR string representation.
+	// Format: "name\tTTL\tCLASS\tTYPE\tDATA" — DATA is the last field;
+	// miekg/dns escapes tabs in RDATA, so the last tab is the TYPE→DATA separator.
 	s := rr.String()
-	tabCount := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\t' {
-			tabCount++
-			if tabCount == 4 {
-				jsonRR.Data = s[i+1:]
-				break
-			}
-		}
+	idx := strings.LastIndexByte(s, '\t')
+	if idx >= 0 {
+		jsonRR.Data = s[idx+1:]
 	}
 	return jsonRR
 }

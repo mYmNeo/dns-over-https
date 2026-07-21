@@ -34,20 +34,15 @@ func TestParseCIDR(t *testing.T) {
 	for _, ednsClientSubnet := range []string{
 		"2001:db8::/0",
 		"2001:db8::/56",
-		"2001:db8::/129",
 		"2001:db8::",
 
 		"127.0.0.1/0",
 		"127.0.0.1/24",
-		"127.0.0.1/33",
 		"127.0.0.1",
 
 		"::ffff:7f00:1/0",
 		"::ffff:7f00:1/120",
 		"::ffff:7f00:1",
-		"127.0.0.1/0",
-		"127.0.0.1/24",
-		"127.0.0.1",
 	} {
 		_, ip, ipNet, err := parseSubnet(ednsClientSubnet)
 		if err != nil {
@@ -66,6 +61,8 @@ func TestParseInvalidCIDR(t *testing.T) {
 		"test/34",
 		"test/56",
 		"test/129",
+		"2001:db8::/129",
+		"127.0.0.1/33",
 	} {
 		_, _, _, err := parseSubnet(ip)
 		if err == nil {

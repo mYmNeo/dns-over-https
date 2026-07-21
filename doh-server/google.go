@@ -146,18 +146,34 @@ func parseSubnet(ednsClientSubnet string) (ednsClientFamily uint16, ednsClientAd
 			err = fmt.Errorf("Invalid argument value: \"edns_client_subnet\" = %q", ednsClientSubnet)
 			return
 		}
-		if ipv4 := ednsClientAddress.To4(); ipv4 != nil {
-			ednsClientFamily = 1
-			ednsClientAddress = ipv4
-		} else {
-			ednsClientFamily = 2
-		}
 		netmask, err1 := strconv.ParseUint(ednsClientSubnet[slash+1:], 10, 8)
 		if err1 != nil {
 			err = fmt.Errorf("Invalid argument value: \"edns_client_subnet\" = %q", ednsClientSubnet)
 			return
 		}
 		ednsClientNetmask = uint8(netmask)
+		if ipv4 := ednsClientAddress.To4(); ipv4 != nil {
+			// Pure IPv4 address: reject netmask > 32.
+			// IPv4-mapped IPv6 (e.g. ::ffff:x.x.x.x) with netmask > 32: keep as IPv6.
+			if ednsClientNetmask > 32 && !strings.Contains(ednsClientSubnet[:slash], ":") {
+				err = fmt.Errorf("Invalid argument value: \"edns_client_subnet\" = %q", ednsClientSubnet)
+				return
+			}
+			if ednsClientNetmask <= 32 {
+				ednsClientFamily = 1
+				ednsClientAddress = ipv4
+			} else if ednsClientNetmask > 128 {
+				err = fmt.Errorf("Invalid argument value: \"edns_client_subnet\" = %q", ednsClientSubnet)
+				return
+			} else {
+				ednsClientFamily = 2
+			}
+		} else if ednsClientNetmask > 128 {
+			err = fmt.Errorf("Invalid argument value: \"edns_client_subnet\" = %q", ednsClientSubnet)
+			return
+		} else {
+			ednsClientFamily = 2
+		}
 	}
 
 	return

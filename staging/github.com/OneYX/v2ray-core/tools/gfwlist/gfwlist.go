@@ -217,6 +217,7 @@ func NewGFWList(urls []string, localFiles []string) (*GFWList, error) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
 			return nil, fmt.Errorf("failed to get gfwlist: %v", resp.Status)
 		}
 

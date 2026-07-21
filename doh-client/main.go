@@ -122,8 +122,15 @@ func main() {
 		for sig := range c {
 			log.Printf("Received signal: %v", sig)
 			client.cleanRules()
+			if pidFile != nil && *pidFile != "" {
+				os.Remove(*pidFile)
+			}
+			client.Shutdown()
 			os.Exit(0)
 		}
 	}()
-	_ = client.Start()
+	if err := client.Start(); err != nil {
+		log.Fatalln(err)
+	}
+	select {}
 }

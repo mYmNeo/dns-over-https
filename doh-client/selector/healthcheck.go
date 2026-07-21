@@ -2,6 +2,7 @@ package selector
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -12,11 +13,14 @@ import (
 func healthCheckUpstreams(upstreams []*Upstream, client *http.Client, timeoutPenalty int32, checkGoogle func(*http.Response, *Upstream), checkIETF func(*http.Response, *Upstream)) {
 	wg := sync.WaitGroup{}
 
+	sem := make(chan struct{}, 10)
 	for i := range upstreams {
 		wg.Add(1)
 
 		go func(i int) {
+			sem <- struct{}{}
 			defer wg.Done()
+			defer func() { <-sem }()
 
 			upstreamURL := upstreams[i].URL
 			var acceptType string
@@ -79,17 +83,17 @@ func checkGoogleResponse(resp *http.Response, upstream *Upstream) {
 		return
 	}
 
-	m := make(map[string]interface{})
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+	body, _ := io.ReadAll(resp.Body)
+	var result struct {
+		Status *float64 `json:"Status"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
 		adjustWeight(upstream, -2)
 		return
 	}
-
-	if status, ok := m["Status"]; ok {
-		if statusNum, ok := status.(float64); ok && statusNum == 0 {
-			adjustWeight(upstream, 5)
-			return
-		}
+	if result.Status != nil && *result.Status == 0 {
+		adjustWeight(upstream, 5)
+		return
 	}
 
 	adjustWeight(upstream, -2)

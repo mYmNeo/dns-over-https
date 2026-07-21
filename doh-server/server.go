@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/handlers"
@@ -49,6 +50,8 @@ type Server struct {
 	tcpClientTLS *dns.Client
 	servemux     *http.ServeMux
 	cachedCert   *tls.Certificate
+	servers      []*http.Server
+	mu           sync.Mutex
 }
 
 type DNSRequest struct {
@@ -137,34 +140,44 @@ func (s *Server) Start() error {
 	}
 
 	results := make(chan error, len(s.conf.Listen))
+	s.servers = make([]*http.Server, 0, len(s.conf.Listen))
 	for _, addr := range s.conf.Listen {
-		go func(addr string) {
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           servemux,
+			ReadTimeout:       30 * time.Second,
+			ReadHeaderTimeout: 10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		if s.conf.Cert != "" || s.conf.Key != "" {
+			tlsConfig := &tls.Config{
+				GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					return s.cachedCert, nil
+				},
+			}
+			if clientCAPool != nil {
+				tlsConfig.ClientCAs = clientCAPool
+				tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			}
+			srv.TLSConfig = tlsConfig
+		}
+		s.servers = append(s.servers, srv)
+	}
+
+	for i, srv := range s.servers {
+		go func(srv *http.Server, idx int) {
 			var err error
-			if s.conf.Cert != "" || s.conf.Key != "" {
-				if clientCAPool != nil {
-					srvtls := &http.Server{
-						Handler: servemux,
-						Addr:    addr,
-						TLSConfig: &tls.Config{
-							ClientCAs:  clientCAPool,
-							ClientAuth: tls.RequireAndVerifyClientCert,
-							GetCertificate: func(info *tls.ClientHelloInfo) (certificate *tls.Certificate, e error) {
-								return s.cachedCert, nil
-							},
-						},
-					}
-					err = srvtls.ListenAndServeTLS("", "")
-				} else {
-					err = http.ListenAndServeTLS(addr, s.conf.Cert, s.conf.Key, servemux)
-				}
+			if srv.TLSConfig != nil {
+				err = srv.ListenAndServeTLS("", "")
 			} else {
-				err = http.ListenAndServe(addr, servemux)
+				err = srv.ListenAndServe()
 			}
 			if err != nil {
 				log.Println(err)
 			}
 			results <- err
-		}(addr)
+		}(srv, i)
 	}
 	// wait for all handlers
 	for i := 0; i < cap(results); i++ {
@@ -177,24 +190,23 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// Shutdown gracefully stops all HTTP servers.
+func (s *Server) Shutdown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, srv := range s.servers {
+		_ = srv.Shutdown(ctx)
+	}
+}
+
 func (s *Server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-		if ip := net.ParseIP(realIP); ip != nil {
-			if ip.To4() != nil {
-				r.RemoteAddr = realIP + ":0"
-			} else {
-				r.RemoteAddr = "[" + realIP + "]:0"
-			}
-		} else {
-			r.RemoteAddr = realIP
-		}
-	}
-
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Origin", "")
 	w.Header().Set("Access-Control-Max-Age", "3600")
 	w.Header().Set("Server", USER_AGENT)
 	w.Header().Set("X-Powered-By", USER_AGENT)
@@ -370,7 +382,7 @@ func (s *Server) doDNSQuery(ctx context.Context, req *DNSRequest) (err error) {
 				}
 
 				// Retry with TCP if this was an IXFR request, and we only received an SOA
-				if (s.indexQuestionType(req.request, dns.TypeIXFR) > -1) &&
+				if err == nil && req.response != nil && (s.indexQuestionType(req.request, dns.TypeIXFR) > -1) &&
 					(len(req.response.Answer) == 1) &&
 					(req.response.Answer[0].Header().Rrtype == dns.TypeSOA) {
 					req.response, _, err = s.tcpClient.ExchangeContext(ctx, req.request, upstream)

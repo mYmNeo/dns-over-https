@@ -43,6 +43,12 @@ import (
 func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r *http.Request) *DNSRequest {
 	requestBase64 := r.FormValue("dns")
 	requestBinary, err := base64.RawURLEncoding.DecodeString(requestBase64)
+	if len(requestBase64) > 65536 {
+		return &DNSRequest{
+			errcode: 400,
+			errtext: fmt.Sprintf("Invalid argument value: \"dns\" too long"),
+		}
+	}
 	if err != nil {
 		return &DNSRequest{
 			errcode: 400,
@@ -50,7 +56,8 @@ func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r 
 		}
 	}
 	if len(requestBinary) == 0 && (r.Header.Get("Content-Type") == "application/dns-message" || r.Header.Get("Content-Type") == "application/dns-udpwireformat") {
-		requestBinary, err = io.ReadAll(r.Body)
+		const maxBodySize = 65536
+		requestBinary, err = io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 		if err != nil {
 			return &DNSRequest{
 				errcode: 400,

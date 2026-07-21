@@ -141,7 +141,7 @@ func Unmarshal(msg *dns.Msg, resp *Response, udpSize uint16, ednsClientNetmask u
 }
 
 func unmarshalRR(rr RR, now time.Time) (dnsRR dns.RR, err error) {
-	if strings.ContainsAny(rr.Name, "\t\r\n \"();\\") {
+	if strings.ContainsAny(rr.Name, "\t\r\n \"();\\") || strings.Contains(rr.Name, ";") {
 		return nil, UnmarshalError{fmt.Sprintf("Record name contains space: %q", rr.Name)}
 	}
 	if rr.ExpiresStr != "" {
@@ -158,10 +158,10 @@ func unmarshalRR(rr RR, now time.Time) (dnsRR dns.RR, err error) {
 	if !ok {
 		return nil, UnmarshalError{fmt.Sprintf("Unknown record type: %d", rr.Type)}
 	}
-	if strings.ContainsAny(rr.Data, "\r\n") {
+	if strings.ContainsAny(rr.Data, "\r\n;") {
 		return nil, UnmarshalError{fmt.Sprintf("Record data contains newline: %q", rr.Data)}
 	}
-	zone := fmt.Sprintf("%s %d IN %s %s", rr.Name, rr.TTL, rrType, rr.Data)
+	zone := rr.Name + " " + strconv.FormatUint(uint64(rr.TTL), 10) + " IN " + rrType + " " + rr.Data
 	dnsRR, err = dns.NewRR(zone)
 	return
 }

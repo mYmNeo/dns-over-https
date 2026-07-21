@@ -102,9 +102,9 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	}
 	req = req.WithContext(ctx)
 	c.httpClientMux.RLock()
-	resp, err := c.httpClient.Do(req)
+	hc := c.httpClient
 	c.httpClientMux.RUnlock()
-
+	resp, err := hc.Do(req)
 	// if http Client.Do returns non-nil error, it always *url.Error
 	/*if err == context.DeadlineExceeded {
 		// Do not respond, silently fail to prevent caching of SERVFAIL
@@ -112,9 +112,7 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 		return &DNSRequest{
 			err: err,
 		}
-	}*/
-
-	if err != nil {
+	}*/if err != nil {
 		return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 	}
 

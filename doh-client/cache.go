@@ -96,6 +96,9 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 	clone.Id = requestID
 
 	// Adjust TTLs downward by elapsed time
+	if elapsed < 0 {
+		elapsed = 0
+	}
 	elapsedSec := uint32(elapsed / time.Second)
 	adjustTTLs(clone.Answer, elapsedSec)
 	adjustTTLs(clone.Ns, elapsedSec)

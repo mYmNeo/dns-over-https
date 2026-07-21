@@ -86,9 +86,9 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 	req = req.WithContext(ctx)
 
 	c.httpClientMux.RLock()
-	resp, err := c.httpClient.Do(req)
+	hc := c.httpClient
 	c.httpClientMux.RUnlock()
-
+	resp, err := hc.Do(req)
 	// if http Client.Do returns non-nil error, it always *url.Error
 	/*if err == context.DeadlineExceeded {
 		// Do not respond, silently fail to prevent caching of SERVFAIL
@@ -96,9 +96,7 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 		return &DNSRequest{
 			err: err,
 		}
-	}*/
-
-	if err != nil {
+	}*/if err != nil {
 		return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 	}
 
@@ -113,9 +111,7 @@ func (c *Client) generateRequestGoogle(ctx context.Context, w dns.ResponseWriter
 }
 
 func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, isTCP bool, req *DNSRequest) *dns.Msg {
-	// Note: req.response.Body is closed by the caller via defer, but we add
-	// a defensive close here for safety in case this function is called from
-	// other contexts. Multiple Close() calls on http response bodies are safe.
+	// Close the response body — parseResponseGoogle owns the lifecycle.
 	defer req.response.Body.Close()
 
 	if req.response.StatusCode != http.StatusOK {
