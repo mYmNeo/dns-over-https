@@ -19,3 +19,4 @@ doh-ip-lookup/doh-ip-lookup
 
 .idea/
 vendor/
+*.pgo
