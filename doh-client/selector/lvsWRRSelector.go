@@ -147,18 +147,19 @@ func (ls *LVSWRRSelector) updateCachedWeightsLocked() {
 }
 
 func gcd(x, y int32) int32 {
-	for {
-		if x < y {
-			x, y = y, x
-		}
-
-		tmp := x % y
-		if tmp == 0 {
-			return y
-		}
-
-		x = tmp
+	if x < 0 {
+		x = -x
 	}
+	if y < 0 {
+		y = -y
+	}
+	if x == 0 || y == 0 {
+		return x | y
+	}
+	for y != 0 {
+		x, y = y, x%y
+	}
+	return x
 }
 
 func (ls *LVSWRRSelector) ReportUpstreamStatus(upstream *Upstream, upstreamStatus upstreamStatus) {

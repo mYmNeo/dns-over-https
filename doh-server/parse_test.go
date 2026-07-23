@@ -24,7 +24,10 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -113,4 +116,73 @@ func TestEdns0SubnetParseCIDR(t *testing.T) {
 	// opt start  0 41 16 0 0 0 0 0 0 23
 	// subnet start  0 8 0 19 0 2 120 0
 	// client subnet start 0 0 0 0 0 0 0 0 0 0 255 255 127 0 0]
+}
+
+func TestParseIETFRejectsOversizedBase64(t *testing.T) {
+	t.Parallel()
+
+	// Build a "dns" form value longer than 65536 characters
+	big := make([]byte, 70000)
+	for i := range big {
+		big[i] = 'A'
+	}
+	req := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+string(big), http.NoBody)
+
+	// We need a Server to call parseRequestIETF
+	// Test only the length guard: if len > 65536, errcode should be 400 before any decode happens
+	// Use a minimal server config
+	srv := &Server{
+		conf: &config{
+			Path: "/dns-query",
+		},
+	}
+
+	// The function needs Context, ResponseWriter, *http.Request
+	// We can test indirectly through handlerFunc, which calls parseRequestIETF
+	w := httptest.NewRecorder()
+	srv.handlerFunc(w, req)
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for oversized dns param, got %d", resp.StatusCode)
+	}
+}
+
+func TestParseIETFValidDNSQuery(t *testing.T) {
+	t.Parallel()
+
+	// A valid base64-encoded minimal DNS query
+	// This is a minimal query for example.com A record
+	dnsParam := "AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB"
+	req := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+dnsParam, http.NoBody)
+
+	srv := &Server{
+		conf: &config{
+			Path:     "/dns-query",
+			Timeout:  5,
+			Tries:    1,
+			Upstream: []string{"udp:127.0.0.1:5353"},
+		},
+		udpClient: &dns.Client{
+			Net:     "udp",
+			UDPSize: dns.DefaultMsgSize,
+			Timeout: 5 * time.Second,
+		},
+		tcpClient: &dns.Client{
+			Net:     "tcp",
+			Timeout: 5 * time.Second,
+		},
+	}
+
+	w := httptest.NewRecorder()
+	srv.handlerFunc(w, req)
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	// Without a real upstream, the query will fail, but it should be a 503 (upstream failure)
+	// not a 400 (parse failure) — confirming the base64 was decoded successfully
+	if resp.StatusCode == http.StatusBadRequest {
+		t.Errorf("valid DNS query should not return 400: got status %d", resp.StatusCode)
+	}
 }

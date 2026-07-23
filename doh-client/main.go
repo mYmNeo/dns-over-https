@@ -36,9 +36,10 @@ import (
 	"github.com/m13253/dns-over-https/v2/doh-client/config"
 )
 
+// checkPIDFile creates a PID file, or exits if the process is already running.
 func checkPIDFile(pidFile string) (bool, error) {
 retry:
-	f, err := os.OpenFile(pidFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	f, err := os.OpenFile(pidFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if os.IsExist(err) {
 		pidStr, err := os.ReadFile(pidFile)
 		if err != nil {

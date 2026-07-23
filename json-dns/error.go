@@ -48,7 +48,9 @@ func FormatError(w http.ResponseWriter, comment string, errcode int) {
 	}
 	errStr, err := json.Marshal(errJSON)
 	if err != nil {
-		log.Fatalln(err)
+		log.Printf("failed to marshal error response: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(errcode)
 	w.Write(errStr)

@@ -182,7 +182,7 @@ func (s *Server) Start() error {
 	// wait for all handlers
 	for i := 0; i < cap(results); i++ {
 		err := <-results
-		if err != nil {
+		if err != nil && err != http.ErrServerClosed {
 			return err
 		}
 	}

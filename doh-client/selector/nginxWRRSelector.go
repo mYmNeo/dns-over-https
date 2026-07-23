@@ -49,6 +49,10 @@ func (ws *NginxWRRSelector) StartEvaluate(ctx context.Context) {
 
 // nginx wrr like.
 func (ws *NginxWRRSelector) Get() *Upstream {
+	if len(ws.upstreams) == 0 {
+		return nil
+	}
+
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
