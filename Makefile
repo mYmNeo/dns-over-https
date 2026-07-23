@@ -1,7 +1,7 @@
-.PHONY: all clean install uninstall
+.PHONY: all clean install package uninstall
 
 PREFIX = /usr/local
-
+VERSION = 2.3.10
 ifeq ($(GOROOT),)
 GOBUILD = go build -ldflags "-s -w" -pgo=auto
 else
@@ -45,6 +45,10 @@ install:
 		$(MAKE) -C darwin-wrapper install "DESTDIR=$(DESTDIR)" "PREFIX=$(PREFIX)"; \
 		$(MAKE) -C launchd install "DESTDIR=$(DESTDIR)"; \
 	fi
+
+package: all
+	tar -czf dns-over-https-$(VERSION)-$$(uname -s | tr A-Z a-z)-$$(go env GOARCH).tar.gz \
+		doh-client/doh-client doh-server/doh-server doh-ip-lookup/doh-ip-lookup
 
 uninstall:
 	rm -f "$(DESTDIR)$(PREFIX)/bin/doh-client" "$(DESTDIR)$(PREFIX)/bin/doh-server" "$(DESTDIR)$(PREFIX)/bin/doh-ip-lookup" "$(DESTDIR)$(CONFDIR)/doh-client.conf.example" "$(DESTDIR)$(CONFDIR)/doh-server.conf.example"
