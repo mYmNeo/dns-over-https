@@ -79,6 +79,7 @@ type Client struct {
 	cache                *queryCache
 	shmStore             *shmmap.Store
 	cancel               context.CancelFunc
+	pprofServer          *http.Server
 	shutdownOnce         sync.Once
 	ipsetCh              chan string
 }
@@ -498,6 +499,14 @@ func (c *Client) Start() error {
 		if reporter, ok := c.selector.(selector.DebugReporter); ok {
 			reporter.ReportWeights(ctx)
 		}
+	}
+	if c.pprofServer != nil {
+		go func() {
+			err := c.pprofServer.ListenAndServe()
+			if err != nil && err != http.ErrServerClosed {
+				log.Println(err)
+			}
+		}()
 	}
 
 	for i := 0; i < cap(results); i++ {
@@ -1077,5 +1086,15 @@ func (c *Client) Shutdown() {
 		if c.httpTransport != nil {
 			c.httpTransport.CloseIdleConnections()
 		}
+		if c.pprofServer != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = c.pprofServer.Shutdown(ctx)
+		}
 	})
+}
+
+// SetPprofServer configures the pprof HTTP server for debugging.
+func (c *Client) SetPprofServer(srv *http.Server) {
+	c.pprofServer = srv
 }

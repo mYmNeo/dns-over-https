@@ -71,6 +71,7 @@ type others struct {
 	DNSShmEnabled         bool     `toml:"dns_shm_enabled"`
 	DNSShmName            string   `toml:"dns_shm_name"`
 	DNSShmSize            uint     `toml:"dns_shm_size"`
+	PprofAddr             string   `toml:"pprof_addr"`
 }
 
 type Config struct {

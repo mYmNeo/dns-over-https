@@ -45,6 +45,7 @@ type config struct {
 	ECSAllowNonGlobalIP bool     `toml:"ecs_allow_non_global_ip"`
 	ECSUsePreciseIP     bool     `toml:"ecs_use_precise_ip"`
 	TLSClientAuth       bool     `toml:"tls_client_auth"`
+	PprofAddr           string   `toml:"pprof_addr"`
 }
 
 func loadConfig(path string) (*config, error) {
