@@ -299,9 +299,7 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 	}
 
 	if c.conf.Other.Verbose {
-		if reporter, ok := c.selector.(selector.DebugReporter); ok {
-			reporter.ReportWeights(context.Background())
-		}
+		// ReportWeights moved to Start() so it uses a cancellable context
 	}
 
 	if c.conf.Other.LocalInterfaceName != "" {
@@ -375,12 +373,16 @@ func (c *Client) newHTTPClient() error {
 			return fmt.Errorf("failed to load certificate: %s", err)
 		}
 		tlsConfig.Certificates = []tls.Certificate{cert}
-
 		clientCA, err := os.ReadFile(c.conf.Other.TLSClientAuthCA)
 		if err != nil {
 			return fmt.Errorf("reading certificate for client authentication has failed: %v", err)
 		}
-		clientCAPool := x509.NewCertPool()
+		clientCAPool, err := x509.SystemCertPool()
+		if err != nil {
+			// SystemCertPool is not available on some platforms (e.g., Windows).
+			// Fall back to an empty pool.
+			clientCAPool = x509.NewCertPool()
+		}
 		clientCAPool.AppendCertsFromPEM(clientCA)
 		tlsConfig.RootCAs = clientCAPool
 	}
@@ -490,7 +492,12 @@ func (c *Client) Start() error {
 		c.shmStore.StartCleanup(ctx)
 	}
 	if c.ipsetCh != nil {
-		c.startIPSetFlusher()
+		c.startIPSetFlusher(ctx)
+	}
+	if c.conf.Other.Verbose {
+		if reporter, ok := c.selector.(selector.DebugReporter); ok {
+			reporter.ReportWeights(ctx)
+		}
 	}
 
 	for i := 0; i < cap(results); i++ {
@@ -559,8 +566,14 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 			return
 		}
 	}
-
 	upstream := c.selector.Get()
+	if upstream == nil {
+		log.Printf("No upstream available for %s", questionName)
+		reply := jsondns.PrepareReply(r)
+		reply.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(reply)
+		return
+	}
 	requestType := upstream.RequestType
 
 	if c.conf.Other.Verbose {
@@ -787,13 +800,19 @@ func (c *Client) AddGFWFilterIP(answers []dns.RR) {
 	}
 }
 
-func (c *Client) startIPSetFlusher() {
+func (c *Client) startIPSetFlusher(ctx context.Context) {
 	go func() {
 		var ips []string
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
+			case <-ctx.Done():
+				// Flush remaining IPs before exiting
+				if len(ips) > 0 {
+					c.flushIPSet(ips)
+				}
+				return
 			case ip := <-c.ipsetCh:
 				ips = append(ips, ip)
 				// Drain any additional queued IPs without blocking

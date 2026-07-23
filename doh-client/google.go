@@ -155,8 +155,10 @@ func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, 
 	buf, err := fullReply.Pack()
 	if err != nil {
 		log.Println(err)
-		req.reply.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(req.reply)
+		// fullReply == req.reply due to Unmarshal aliasing (reply := msg).
+		// fullReply may be in an inconsistent state after the failed Pack,
+		// so create a fresh SERVFAIL rather than reusing it.
+		sendErrorReply(w, r, dns.RcodeServerFailure, nil)
 		return nil
 	}
 	w.Write(buf)

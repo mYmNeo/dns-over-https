@@ -45,7 +45,7 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	udpSize := uint16(512)
 	if opt == nil {
 		opt = jsondns.NewOPTRecord(dns.DefaultMsgSize, false)
-		r.Extra = append([]dns.RR{opt}, r.Extra...)
+		r.Extra = append(r.Extra, opt)
 	} else {
 		udpSize = opt.UDPSize()
 	}
@@ -73,10 +73,10 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 	requestID := r.Id
 	r.Id = 0
 	requestBinary, err := r.Pack()
+	r.Id = requestID
 	if err != nil {
 		return sendErrorReply(w, r, dns.RcodeFormatError, err)
 	}
-	r.Id = requestID
 	requestBase64 := base64.RawURLEncoding.EncodeToString(requestBinary)
 
 	requestURL := upstream.URL + "?ct=application/dns-message&dns=" + requestBase64

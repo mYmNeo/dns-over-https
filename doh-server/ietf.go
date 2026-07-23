@@ -42,13 +42,13 @@ import (
 
 func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r *http.Request) *DNSRequest {
 	requestBase64 := r.FormValue("dns")
-	requestBinary, err := base64.RawURLEncoding.DecodeString(requestBase64)
 	if len(requestBase64) > 65536 {
 		return &DNSRequest{
 			errcode: 400,
 			errtext: fmt.Sprintf("Invalid argument value: \"dns\" too long"),
 		}
 	}
+	requestBinary, err := base64.RawURLEncoding.DecodeString(requestBase64)
 	if err != nil {
 		return &DNSRequest{
 			errcode: 400,
@@ -108,7 +108,7 @@ func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r 
 	opt := msg.IsEdns0()
 	if opt == nil {
 		opt = jsondns.NewOPTRecord(dns.DefaultMsgSize, false)
-		msg.Extra = append([]dns.RR{opt}, msg.Extra...)
+		msg.Extra = append(msg.Extra, opt)
 	}
 	var edns0Subnet *dns.EDNS0_SUBNET
 	for _, option := range opt.Option {

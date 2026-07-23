@@ -215,6 +215,9 @@ func (qc *queryCache) cleanup() {
 // adjustTTLs decrements the TTL of each RR by elapsedSec, clamping at zero.
 func adjustTTLs(rrs []dns.RR, elapsedSec uint32) {
 	for _, rr := range rrs {
+		if rr.Header().Rrtype == dns.TypeOPT {
+			continue
+		}
 		h := rr.Header()
 		if h.Ttl > elapsedSec {
 			h.Ttl -= elapsedSec

@@ -3,6 +3,7 @@ package selector
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -38,16 +39,15 @@ func healthCheckUpstreams(upstreams []*Upstream, client *http.Client, timeoutPen
 
 			req, err := http.NewRequest(http.MethodGet, upstreamURL, http.NoBody)
 			if err != nil {
-				panic("upstream: " + upstreamURL + " type: " + typeMap[upstreams[i].Type] + " check failed: " + err.Error())
+				log.Printf("upstream: %s type: %s check failed: %v", upstreamURL, typeMap[upstreams[i].Type], err)
+				return
 			}
 
 			req.Header.Set("accept", acceptType)
 
 			resp, err := client.Do(req)
 			if err != nil {
-				if atomic.AddInt32(&upstreams[i].effectiveWeight, timeoutPenalty) < 1 {
-					atomic.StoreInt32(&upstreams[i].effectiveWeight, 1)
-				}
+				adjustWeight(upstreams[i], timeoutPenalty)
 				return
 			}
 
@@ -66,11 +66,17 @@ func healthCheckUpstreams(upstreams []*Upstream, client *http.Client, timeoutPen
 
 // adjustWeight atomically adjusts the effective weight, clamping to [1, maxWeight].
 func adjustWeight(upstream *Upstream, delta int32) {
-	newWeight := atomic.AddInt32(&upstream.effectiveWeight, delta)
-	if delta < 0 && newWeight < 1 {
-		atomic.StoreInt32(&upstream.effectiveWeight, 1)
-	} else if delta > 0 && newWeight > upstream.weight {
-		atomic.StoreInt32(&upstream.effectiveWeight, upstream.weight)
+	for {
+		old := atomic.LoadInt32(&upstream.effectiveWeight)
+		newWeight := old + delta
+		if newWeight < 1 {
+			newWeight = 1
+		} else if newWeight > upstream.weight {
+			newWeight = upstream.weight
+		}
+		if atomic.CompareAndSwapInt32(&upstream.effectiveWeight, old, newWeight) {
+			return
+		}
 	}
 }
 

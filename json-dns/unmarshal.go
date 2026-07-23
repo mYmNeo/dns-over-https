@@ -158,7 +158,9 @@ func unmarshalRR(rr RR, now time.Time) (dnsRR dns.RR, err error) {
 	if !ok {
 		return nil, UnmarshalError{fmt.Sprintf("Unknown record type: %d", rr.Type)}
 	}
-	if strings.ContainsAny(rr.Data, "\r\n;") {
+	// Only reject actual newline characters in data — semicolons are valid
+	// inside quoted TXT/DMARC/DKIM strings and dns.NewRR handles them correctly.
+	if strings.ContainsAny(rr.Data, "\r\n") {
 		return nil, UnmarshalError{fmt.Sprintf("Record data contains newline: %q", rr.Data)}
 	}
 	zone := rr.Name + " " + strconv.FormatUint(uint64(rr.TTL), 10) + " IN " + rrType + " " + rr.Data

@@ -23,6 +23,9 @@ func (rs *RandomSelector) Add(url string, upstreamType UpstreamType) (err error)
 }
 
 func (rs *RandomSelector) Get() *Upstream {
+	if len(rs.upstreams) == 0 {
+		return nil
+	}
 	return rs.upstreams[rand.IntN(len(rs.upstreams))]
 }
 
