@@ -52,6 +52,12 @@ type Server struct {
 	cachedCert   *tls.Certificate
 	servers      []*http.Server
 	mu           sync.Mutex
+	pprofServer  *http.Server
+}
+
+// SetPprofServer sets the pprof HTTP server to be started and shut down alongside the main servers.
+func (s *Server) SetPprofServer(srv *http.Server) {
+	s.pprofServer = srv
 }
 
 type DNSRequest struct {
@@ -163,6 +169,9 @@ func (s *Server) Start() error {
 			srv.TLSConfig = tlsConfig
 		}
 		s.servers = append(s.servers, srv)
+	}
+	if s.pprofServer != nil {
+		s.servers = append(s.servers, s.pprofServer)
 	}
 
 	for i, srv := range s.servers {

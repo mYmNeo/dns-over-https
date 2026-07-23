@@ -27,11 +27,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"runtime"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/m13253/dns-over-https/v2/doh-client/config"
 )
@@ -116,6 +119,12 @@ func main() {
 	client, err := NewClient(conf)
 	if err != nil {
 		log.Fatalln(err)
+	}
+	if conf.Other.PprofAddr != "" {
+		client.SetPprofServer(&http.Server{
+			Addr:              conf.Other.PprofAddr,
+			ReadHeaderTimeout: 5 * time.Second,
+		})
 	}
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
