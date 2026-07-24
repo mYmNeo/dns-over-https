@@ -10,7 +10,7 @@ import (
 )
 
 // healthCheckUpstreams runs health checks on all upstreams concurrently using the provided HTTP client.
-// timeoutPenalty is the weight penalty for connection failures (e.g., -5 for LVS, -10 for Nginx).
+// timeoutPenalty is the weight penalty for connection failures (e.g., -10 for LVS, -5 for Nginx).
 func healthCheckUpstreams(upstreams []*Upstream, client *http.Client, timeoutPenalty int32, checkGoogle func(*http.Response, *Upstream), checkIETF func(*http.Response, *Upstream)) {
 	wg := sync.WaitGroup{}
 

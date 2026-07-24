@@ -495,6 +495,22 @@ func (c *Client) Start() error {
 	if c.ipsetCh != nil {
 		c.startIPSetFlusher(ctx)
 	}
+
+	// Periodically refresh HTTP client to recycle stale connections
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := c.newHTTPClient(); err != nil {
+					log.Printf("Failed to refresh HTTP client: %v", err)
+				}
+			}
+		}
+	}()
 	if c.conf.Other.Verbose {
 		if reporter, ok := c.selector.(selector.DebugReporter); ok {
 			reporter.ReportWeights(ctx)
@@ -1083,9 +1099,11 @@ func (c *Client) Shutdown() {
 		if c.shmStore != nil {
 			c.shmStore.Close()
 		}
+		c.httpClientMux.Lock()
 		if c.httpTransport != nil {
 			c.httpTransport.CloseIdleConnections()
 		}
+		c.httpClientMux.Unlock()
 		if c.pprofServer != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

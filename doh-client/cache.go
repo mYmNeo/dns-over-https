@@ -140,6 +140,10 @@ func (qc *queryCache) put(msg *dns.Msg) {
 		return
 	}
 
+	if len(msg.Question) == 0 {
+		return
+	}
+
 	question := msg.Question[0]
 	key := cacheKey{
 		Name:   strings.ToLower(question.Name),

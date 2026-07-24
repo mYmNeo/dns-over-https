@@ -68,3 +68,56 @@ func TestAdjustTTLsClampAtZero(t *testing.T) {
 		t.Errorf("A TTL = %d, want 0 (clamped)", a.Hdr.Ttl)
 	}
 }
+
+func TestPutWithEmptyQuestion(t *testing.T) {
+	// Regression test: put() must not panic on a response with Rcode==0,
+	// answers, but no questions.
+	cache := newQueryCache()
+	msg := new(dns.Msg)
+	msg.Response = true
+	msg.Rcode = dns.RcodeSuccess
+	msg.Answer = append(msg.Answer, &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   "example.com.",
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		A: net.ParseIP("1.2.3.4").To4(),
+	})
+	// Deliberately leave msg.Question empty
+
+	// This should not panic
+	cache.put(msg)
+
+	// Verify cache is still empty (nothing was stored)
+	_, _, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, 0, true, 512)
+	if ok {
+		t.Error("cache should be empty after put with no questions")
+	}
+}
+
+func TestPutSuccessStoresAndReturns(t *testing.T) {
+	cache := newQueryCache()
+	msg := new(dns.Msg)
+	msg.Response = true
+	msg.Rcode = dns.RcodeSuccess
+	msg.Question = []dns.Question{{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	msg.Answer = append(msg.Answer, &dns.A{
+		Hdr: dns.RR_Header{
+			Name:   "example.com.",
+			Rrtype: dns.TypeA,
+			Class:  dns.ClassINET,
+			Ttl:    300,
+		},
+		A: net.ParseIP("1.2.3.4").To4(),
+	})
+	msg.SetRcode(msg, dns.RcodeSuccess)
+
+	cache.put(msg)
+
+	_, _, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, 0, true, 512)
+	if !ok {
+		t.Error("expected cache hit after put")
+	}
+}
