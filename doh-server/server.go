@@ -145,8 +145,12 @@ func (s *Server) Start() error {
 		s.cachedCert = &cert
 	}
 
-	results := make(chan error, len(s.conf.Listen))
-	s.servers = make([]*http.Server, 0, len(s.conf.Listen))
+	numServers := len(s.conf.Listen)
+	if s.pprofServer != nil {
+		numServers++
+	}
+	results := make(chan error, numServers)
+	s.servers = make([]*http.Server, 0, numServers)
 	for _, addr := range s.conf.Listen {
 		srv := &http.Server{
 			Addr:              addr,

@@ -47,7 +47,7 @@ func (ls *LVSWRRSelector) StartEvaluate(ctx context.Context) {
 		defer ticker.Stop()
 
 		for {
-			healthCheckUpstreams(ls.upstreams, &ls.client, -5, checkGoogleResponse, checkIETFResponse)
+			healthCheckUpstreams(ls.upstreams, &ls.client, -10, checkGoogleResponse, checkIETFResponse)
 			ls.updateCachedWeights()
 
 			select {
@@ -165,7 +165,7 @@ func gcd(x, y int32) int32 {
 func (ls *LVSWRRSelector) ReportUpstreamStatus(upstream *Upstream, upstreamStatus upstreamStatus) {
 	switch upstreamStatus {
 	case Timeout:
-		adjustWeight(upstream, -5)
+		adjustWeight(upstream, -10)
 	case Error:
 		adjustWeight(upstream, -2)
 	case OK:

@@ -36,7 +36,7 @@ func (ws *NginxWRRSelector) StartEvaluate(ctx context.Context) {
 		defer ticker.Stop()
 
 		for {
-			healthCheckUpstreams(ws.upstreams, &ws.client, -10, checkGoogleResponse, checkIETFResponse)
+			healthCheckUpstreams(ws.upstreams, &ws.client, -5, checkGoogleResponse, checkIETFResponse)
 
 			select {
 			case <-ctx.Done():
