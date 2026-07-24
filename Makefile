@@ -47,8 +47,11 @@ install:
 	fi
 
 package: all
+	mkdir -p .package-tmp
+	cp doh-client/doh-client doh-server/doh-server doh-ip-lookup/doh-ip-lookup .package-tmp/
 	tar -czf dns-over-https-$(VERSION)-$$(uname -s | tr A-Z a-z)-$$(go env GOARCH).tar.gz \
-		doh-client/doh-client doh-server/doh-server doh-ip-lookup/doh-ip-lookup
+		-C .package-tmp doh-client doh-server doh-ip-lookup
+	rm -rf .package-tmp
 
 uninstall:
 	rm -f "$(DESTDIR)$(PREFIX)/bin/doh-client" "$(DESTDIR)$(PREFIX)/bin/doh-server" "$(DESTDIR)$(PREFIX)/bin/doh-ip-lookup" "$(DESTDIR)$(CONFDIR)/doh-client.conf.example" "$(DESTDIR)$(CONFDIR)/doh-server.conf.example"
