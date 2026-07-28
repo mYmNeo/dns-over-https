@@ -26,7 +26,6 @@ package main
 import (
 	"context"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +39,8 @@ type cacheKey struct {
 }
 
 type cacheEntry struct {
-	msg      *dns.Msg      // Deep copy of the response
+	msg      *dns.Msg      // Deep copy of the response (read-only once stored)
+	packed   []byte        // Pre-packed wire bytes (msg.Id as stored)
 	storedAt time.Time     // When cached
 	ttl      time.Duration // Minimum TTL across all Answer RRs
 }
@@ -91,15 +91,27 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 		return nil, nil, false
 	}
 
-	// Clone the message so we don't mutate the cached copy
+	// Fast path: if no time has elapsed and we have pre-packed bytes,
+	// patch the 2-byte transaction ID in-place and return without
+	// deep-cloning or re-packing. recordResponse only reads Answer
+	// IPs transiently (never mutates or retains the pointer), so
+	// returning entry.msg directly is safe.
+	elapsedSec := uint32(elapsed / time.Second)
+	if elapsedSec == 0 && entry.packed != nil {
+		if isTCP || len(entry.packed) <= int(udpSize) {
+			buf := make([]byte, len(entry.packed))
+			copy(buf, entry.packed)
+			buf[0] = byte(requestID >> 8)
+			buf[1] = byte(requestID)
+			return buf, entry.msg, true
+		}
+	}
+
+	// Slow path: TTLs have changed or pre-packed bytes unavailable.
+	// Deep-clone to mutate TTLs and ID without racing.
 	clone := entry.msg.Copy()
 	clone.Id = requestID
 
-	// Adjust TTLs downward by elapsed time
-	if elapsed < 0 {
-		elapsed = 0
-	}
-	elapsedSec := uint32(elapsed / time.Second)
 	adjustTTLs(clone.Answer, elapsedSec)
 	adjustTTLs(clone.Ns, elapsedSec)
 	adjustTTLs(clone.Extra, elapsedSec)
@@ -146,7 +158,7 @@ func (qc *queryCache) put(msg *dns.Msg) {
 
 	question := msg.Question[0]
 	key := cacheKey{
-		Name:   strings.ToLower(question.Name),
+		Name:   toLowerASCII(question.Name),
 		Qtype:  question.Qtype,
 		Qclass: question.Qclass,
 	}
@@ -155,6 +167,11 @@ func (qc *queryCache) put(msg *dns.Msg) {
 		msg:      msg.Copy(),
 		storedAt: time.Now(),
 		ttl:      time.Duration(minTTL) * time.Second,
+	}
+
+	// Pre-pack for zero-alloc fast-path on cache hit with elapsedSec == 0
+	if packed, err := entry.msg.Pack(); err == nil {
+		entry.packed = packed
 	}
 
 	qc.mu.Lock()
@@ -219,10 +236,10 @@ func (qc *queryCache) cleanup() {
 // adjustTTLs decrements the TTL of each RR by elapsedSec, clamping at zero.
 func adjustTTLs(rrs []dns.RR, elapsedSec uint32) {
 	for _, rr := range rrs {
-		if rr.Header().Rrtype == dns.TypeOPT {
+		h := rr.Header()
+		if h.Rrtype == dns.TypeOPT {
 			continue
 		}
-		h := rr.Header()
 		if h.Ttl > elapsedSec {
 			h.Ttl -= elapsedSec
 		} else {
