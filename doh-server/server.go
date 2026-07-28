@@ -230,8 +230,7 @@ func (s *Server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Form == nil {
-		const maxMemory = 32 << 20 // 32 MB
-		r.ParseMultipartForm(maxMemory)
+		r.ParseForm()
 	}
 
 	for _, header := range s.conf.DebugHTTPHeaders {
@@ -253,18 +252,8 @@ func (s *Server) handlerFunc(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var responseType string
-	for _, responseCandidate := range strings.Split(r.Header.Get("Accept"), ",") {
-		responseCandidate = strings.SplitN(responseCandidate, ";", 2)[0]
-		if responseCandidate == "application/json" {
-			responseType = "application/json"
-			break
-		} else if responseCandidate == "application/dns-udpwireformat" {
-			responseType = "application/dns-message"
-			break
-		} else if responseCandidate == "application/dns-message" {
-			responseType = "application/dns-message"
-			break
-		}
+	if accept := r.Header.Get("Accept"); accept != "" {
+		responseType = parseAcceptType(accept)
 	}
 	if responseType == "" {
 		// Guess response Content-Type based on request Content-Type
@@ -319,11 +308,18 @@ func (s *Server) findClientIP(r *http.Request) net.IP {
 		return nil
 	}
 
-	XForwardedFor := r.Header.Get("X-Forwarded-For")
-	if XForwardedFor != "" {
-		for _, addr := range strings.Split(XForwardedFor, ",") {
-			addr = strings.TrimSpace(addr)
-			ip := net.ParseIP(addr)
+	if xForwardedFor := r.Header.Get("X-Forwarded-For"); xForwardedFor != "" {
+		// Scan comma-separated IPs without allocating a []string slice.
+		for xForwardedFor != "" {
+			var addr string
+			if idx := strings.IndexByte(xForwardedFor, ','); idx >= 0 {
+				addr = xForwardedFor[:idx]
+				xForwardedFor = xForwardedFor[idx+1:]
+			} else {
+				addr = xForwardedFor
+				xForwardedFor = ""
+			}
+			ip := net.ParseIP(strings.TrimSpace(addr))
 			if jsondns.IsGlobalIP(ip) {
 				return ip
 			}
@@ -338,11 +334,14 @@ func (s *Server) findClientIP(r *http.Request) net.IP {
 		}
 	}
 
-	remoteAddr, err := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	hostStr, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return nil
 	}
-	ip := remoteAddr.IP
+	ip := net.ParseIP(hostStr)
+	if ip == nil {
+		return nil
+	}
 	if s.conf.ECSAllowNonGlobalIP || jsondns.IsGlobalIP(ip) {
 		return ip
 	}
@@ -357,6 +356,37 @@ func (s *Server) patchRootRD(req *DNSRequest) *DNSRequest {
 		}
 	}
 	return req
+}
+
+// parseAcceptType scans the Accept header value for known DNS response types
+// without allocating intermediate slices.
+func parseAcceptType(accept string) string {
+	for {
+		// Find next comma-separated segment
+		idx := strings.IndexByte(accept, ',')
+		var candidate string
+		if idx < 0 {
+			candidate = accept
+		} else {
+			candidate = accept[:idx]
+		}
+		// Strip quality parameters
+		if semi := strings.IndexByte(candidate, ';'); semi >= 0 {
+			candidate = candidate[:semi]
+		}
+		candidate = strings.TrimSpace(candidate)
+		switch candidate {
+		case "application/json":
+			return "application/json"
+		case "application/dns-udpwireformat", "application/dns-message":
+			return "application/dns-message"
+		}
+		if idx < 0 {
+			break
+		}
+		accept = accept[idx+1:]
+	}
+	return ""
 }
 
 // Return the position index for the question of qtype from a DNS msg, otherwise return -1.

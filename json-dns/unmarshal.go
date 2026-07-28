@@ -163,7 +163,16 @@ func unmarshalRR(rr RR, now time.Time) (dnsRR dns.RR, err error) {
 	if strings.ContainsAny(rr.Data, "\r\n") {
 		return nil, UnmarshalError{fmt.Sprintf("Record data contains newline: %q", rr.Data)}
 	}
-	zone := rr.Name + " " + strconv.FormatUint(uint64(rr.TTL), 10) + " IN " + rrType + " " + rr.Data
+	var buf strings.Builder
+	buf.Grow(len(rr.Name) + 1 + 10 + 4 + len(rrType) + 1 + len(rr.Data))
+	buf.WriteString(rr.Name)
+	buf.WriteByte(' ')
+	buf.WriteString(strconv.FormatUint(uint64(rr.TTL), 10))
+	buf.WriteString(" IN ")
+	buf.WriteString(rrType)
+	buf.WriteByte(' ')
+	buf.WriteString(rr.Data)
+	zone := buf.String()
 	dnsRR, err = dns.NewRR(zone)
 	return
 }

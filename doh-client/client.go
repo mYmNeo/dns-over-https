@@ -553,7 +553,7 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 		return
 	}
 	question := &r.Question[0]
-	questionName := strings.ToLower(question.Name)
+	questionName := toLowerASCII(question.Name)
 	questionClass := jsondns.ClassToString(question.Qclass)
 	questionType := jsondns.TypeToString(question.Qtype)
 	if c.conf.Other.Verbose {
@@ -1115,4 +1115,26 @@ func (c *Client) Shutdown() {
 // SetPprofServer configures the pprof HTTP server for debugging.
 func (c *Client) SetPprofServer(srv *http.Server) {
 	c.pprofServer = srv
+}
+
+// toLowerASCII returns the ASCII-lowercased version of s.
+// If s is already lowercase, it returns s without allocating.
+func toLowerASCII(s string) string {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			// Found uppercase — need to allocate.
+			b := make([]byte, len(s))
+			copy(b, s[:i])
+			for ; i < len(s); i++ {
+				c := s[i]
+				if c >= 'A' && c <= 'Z' {
+					c += 'a' - 'A'
+				}
+				b[i] = c
+			}
+			return string(b)
+		}
+	}
+	return s
 }
