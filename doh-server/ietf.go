@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -40,22 +41,49 @@ import (
 	jsondns "github.com/m13253/dns-over-https/v2/json-dns"
 )
 
+// dnsBufferPool reuses byte buffers for base64 decoding and DNS message
+// packing on the RFC 8484 request/response hot path, eliminating per-request
+// heap allocations for buffers that are used once and discarded.
+var dnsBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
+
 func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r *http.Request) *DNSRequest {
 	requestBase64 := r.FormValue("dns")
 	if len(requestBase64) > 65536 {
 		return &DNSRequest{
 			errcode: 400,
-			errtext: fmt.Sprintf("Invalid argument value: \"dns\" too long"),
+			errtext: "Invalid argument value: \"dns\" too long",
 		}
 	}
-	requestBinary, err := base64.RawURLEncoding.DecodeString(requestBase64)
+	// Decode base64 query parameter into a pooled buffer.
+	// msg.Unpack does not retain the input bytes, so the buffer is safe to reuse.
+	decodedLen := base64.RawURLEncoding.DecodedLen(len(requestBase64))
+	bufp := dnsBufferPool.Get().(*[]byte)
+	defer func() {
+		if bufp != nil {
+			dnsBufferPool.Put(bufp)
+		}
+	}()
+	if cap(*bufp) < decodedLen {
+		*bufp = make([]byte, decodedLen)
+	}
+	decoded := (*bufp)[:decodedLen]
+	n, err := base64.RawURLEncoding.Decode(decoded, []byte(requestBase64))
 	if err != nil {
 		return &DNSRequest{
 			errcode: 400,
 			errtext: fmt.Sprintf("Invalid argument value: \"dns\" = %q", requestBase64),
 		}
 	}
+	requestBinary := decoded[:n]
 	if len(requestBinary) == 0 && (r.Header.Get("Content-Type") == "application/dns-message" || r.Header.Get("Content-Type") == "application/dns-udpwireformat") {
+		// Switch to body path; release pooled buffer.
+		dnsBufferPool.Put(bufp)
+		bufp = nil
 		const maxBodySize = 65536
 		requestBinary, err = io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 		if err != nil {
@@ -138,8 +166,14 @@ func (s *Server) parseRequestIETF(ctx context.Context, w http.ResponseWriter, r 
 func (s *Server) generateResponseIETF(ctx context.Context, w http.ResponseWriter, r *http.Request, req *DNSRequest) {
 	respMeta := jsondns.ComputeResponseMeta(req.response)
 	req.response.Id = req.transactionID
-	respBytes, err := req.response.Pack()
+	// Pack into a pooled buffer. PackBuffer reuses buf if it fits;
+	// otherwise it allocates a new slice. Either way the pool buffer
+	// is returned after the response is written.
+	bufp := dnsBufferPool.Get().(*[]byte)
+	buf := (*bufp)[:cap(*bufp)]
+	respBytes, err := req.response.PackBuffer(buf)
 	if err != nil {
+		dnsBufferPool.Put(bufp)
 		log.Printf("DNS packet construct failure with upstream %s: %v\n", req.currentUpstream, err)
 		jsondns.FormatError(w, fmt.Sprintf("DNS packet construct failure (%s)", err.Error()), 500)
 		return
@@ -152,6 +186,7 @@ func (s *Server) generateResponseIETF(ctx context.Context, w http.ResponseWriter
 		w.WriteHeader(503)
 	}
 	_, err = w.Write(respBytes)
+	dnsBufferPool.Put(bufp)
 	if err != nil {
 		log.Printf("failed to write to client: %v\n", err)
 	}
