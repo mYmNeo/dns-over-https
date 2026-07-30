@@ -152,8 +152,10 @@ func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, 
 	} else {
 		fullReply.Truncate(int(req.udpSize))
 	}
-	buf, err := fullReply.Pack()
+	bufp := dnsBufferPool.Get().(*[]byte)
+	buf, err := fullReply.PackBuffer((*bufp)[:cap(*bufp)])
 	if err != nil {
+		dnsBufferPool.Put(bufp)
 		log.Println(err)
 		// fullReply == req.reply due to Unmarshal aliasing (reply := msg).
 		// fullReply may be in an inconsistent state after the failed Pack,
@@ -162,6 +164,7 @@ func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, 
 		return nil
 	}
 	w.Write(buf)
+	dnsBufferPool.Put(bufp)
 	return fullReply
 }
 
