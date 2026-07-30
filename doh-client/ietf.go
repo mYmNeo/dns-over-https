@@ -32,6 +32,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -39,6 +40,16 @@ import (
 	"github.com/m13253/dns-over-https/v2/doh-client/selector"
 	jsondns "github.com/m13253/dns-over-https/v2/json-dns"
 )
+
+// dnsBufferPool reuses byte buffers for base64 encoding and DNS message
+// packing on the RFC 8484 request/response hot path, eliminating per-request
+// heap allocations for buffers that are used once and discarded.
+var dnsBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
 
 func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, isTCP bool, upstream *selector.Upstream) *DNSRequest {
 	opt := r.IsEdns0()
@@ -72,23 +83,46 @@ func (c *Client) generateRequestIETF(ctx context.Context, w dns.ResponseWriter, 
 
 	requestID := r.Id
 	r.Id = 0
-	requestBinary, err := r.Pack()
+	bufp := dnsBufferPool.Get().(*[]byte)
+	packed, err := r.PackBuffer((*bufp)[:cap(*bufp)])
 	r.Id = requestID
 	if err != nil {
+		dnsBufferPool.Put(bufp)
 		return sendErrorReply(w, r, dns.RcodeFormatError, err)
 	}
-	requestBase64 := base64.RawURLEncoding.EncodeToString(requestBinary)
+	// Encode the packed query into a pooled buffer instead of allocating a
+	// fresh []byte via EncodeToString on every request. The string copy
+	// below is unavoidable (the URL needs a string) but the intermediate
+	// []byte allocation is eliminated.
+	encBufp := dnsBufferPool.Get().(*[]byte)
+	encLen := base64.RawURLEncoding.EncodedLen(len(packed))
+	if cap(*encBufp) < encLen {
+		*encBufp = make([]byte, encLen)
+	}
+	encBuf := (*encBufp)[:encLen]
+	base64.RawURLEncoding.Encode(encBuf, packed)
+	requestBase64 := string(encBuf)
+	dnsBufferPool.Put(encBufp)
 
 	requestURL := upstream.URL + "?ct=application/dns-message&dns=" + requestBase64
 
 	var req *http.Request
 	if len(requestURL) < 2048 {
+		// GET path: the packed bytes are already captured in requestBase64,
+		// so the pack buffer can be released before the network round-trip.
+		dnsBufferPool.Put(bufp)
 		req, err = http.NewRequest(http.MethodGet, requestURL, http.NoBody)
 		if err != nil {
 			return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 		}
 	} else {
-		req, err = http.NewRequest(http.MethodPost, upstream.URL, bytes.NewReader(requestBinary))
+		// POST path (rare, query too long for a URL): copy the packed bytes
+		// into an independent slice because bytes.NewReader retains the
+		// reference past the function return, then release the pack buffer.
+		body := make([]byte, len(packed))
+		copy(body, packed)
+		dnsBufferPool.Put(bufp)
+		req, err = http.NewRequest(http.MethodPost, upstream.URL, bytes.NewReader(body))
 		if err != nil {
 			return sendErrorReply(w, r, dns.RcodeServerFailure, err)
 		}
@@ -197,14 +231,17 @@ func (c *Client) parseResponseIETF(ctx context.Context, w dns.ResponseWriter, r 
 	} else {
 		fullReply.Truncate(int(req.udpSize))
 	}
-	buf, err := fullReply.Pack()
+	bufp := dnsBufferPool.Get().(*[]byte)
+	buf, err := fullReply.PackBuffer((*bufp)[:cap(*bufp)])
 	if err != nil {
+		dnsBufferPool.Put(bufp)
 		log.Printf("packing error with upstream %s: %v\n", req.currentUpstream, err)
 		req.reply.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(req.reply)
 		return nil
 	}
 	_, err = w.Write(buf)
+	dnsBufferPool.Put(bufp)
 	if err != nil {
 		log.Printf("failed to write to client: %v\n", err)
 	}
