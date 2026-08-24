@@ -147,19 +147,17 @@ func (c *Client) parseResponseGoogle(ctx context.Context, w dns.ResponseWriter, 
 	fixEmptyNames(&respJSON)
 
 	fullReply := jsondns.Unmarshal(req.reply, &respJSON, req.udpSize, req.ednsClientNetmask)
-	if isTCP {
-		fullReply.Truncate(dns.MaxMsgSize)
-	} else {
-		fullReply.Truncate(int(req.udpSize))
-	}
+	// Truncate only a transport copy. Returning a Truncate()'d message would
+	// permanently drop RRs from cache/shm for later larger UDP/TCP clients.
+	// Also avoids mutating req.reply via Unmarshal aliasing before cache.put.
+	wireReply := truncateForTransport(fullReply, isTCP, req.udpSize)
 	bufp := dnsBufferPool.Get().(*[]byte)
-	buf, err := fullReply.PackBuffer((*bufp)[:cap(*bufp)])
+	buf, err := wireReply.PackBuffer((*bufp)[:cap(*bufp)])
 	if err != nil {
 		dnsBufferPool.Put(bufp)
 		log.Println(err)
 		// fullReply == req.reply due to Unmarshal aliasing (reply := msg).
-		// fullReply may be in an inconsistent state after the failed Pack,
-		// so create a fresh SERVFAIL rather than reusing it.
+		// wireReply may be inconsistent after the failed Pack; fullReply is intact.
 		sendErrorReply(w, r, dns.RcodeServerFailure, nil)
 		return nil
 	}

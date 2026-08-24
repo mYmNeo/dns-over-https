@@ -577,7 +577,9 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	if opt := r.IsEdns0(); opt != nil {
 		udpSize = opt.UDPSize()
 	}
-	if buf, msg, ok := c.cache.get(questionName, question.Qtype, question.Qclass, r.Id, isTCP, udpSize); ok {
+	ednsAddr, ednsMask := c.findClientIP(w, r)
+	ecsKey := ecsCacheKey(ednsAddr, ednsMask)
+	if buf, msg, ok := c.cache.get(questionName, question.Qtype, question.Qclass, r.Id, isTCP, udpSize, ecsKey); ok {
 		if c.conf.Other.Verbose {
 			log.Printf("cache hit: %s %s %s\n", questionName, questionClass, questionType)
 		}
@@ -672,7 +674,7 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 	}
 
 	if fullReply != nil {
-		c.cache.put(fullReply)
+		c.cache.put(fullReply, ecsKey)
 		c.recordResponse(fullReply)
 	}
 

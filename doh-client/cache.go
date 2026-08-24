@@ -25,7 +25,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
 
@@ -36,6 +38,7 @@ type cacheKey struct {
 	Name   string // FQDN lowercased (DNS is case-insensitive)
 	Qtype  uint16
 	Qclass uint16
+	ECS    string // client subnet key, e.g. "203.0.113.0/24"; empty when no ECS
 }
 
 type cacheEntry struct {
@@ -60,15 +63,26 @@ func newQueryCache() *queryCache {
 	}
 }
 
+// ecsCacheKey builds the cache dimension for EDNS Client Subnet.
+// An empty string means "no ECS" (shared across clients when no_ecs is set
+// or when neither the query nor RemoteAddr yields a global client IP).
+func ecsCacheKey(addr net.IP, mask uint8) string {
+	if mask == 0 || addr == nil || addr.IsUnspecified() {
+		return ""
+	}
+	return fmt.Sprintf("%s/%d", addr.String(), mask)
+}
+
 // get looks up a cached DNS response. It checks expiry, adjusts TTLs downward
 // by elapsed time, sets the correct request ID, and returns packed wire bytes.
 // The cloned message is also returned so callers can inspect answer IPs
 // without a second lookup.
-func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, isTCP bool, udpSize uint16) ([]byte, *dns.Msg, bool) {
+func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, isTCP bool, udpSize uint16, ecs string) ([]byte, *dns.Msg, bool) {
 	key := cacheKey{
 		Name:   name,
 		Qtype:  qtype,
 		Qclass: qclass,
+		ECS:    ecs,
 	}
 
 	qc.mu.RLock()
@@ -132,7 +146,7 @@ func (qc *queryCache) get(name string, qtype, qclass uint16, requestID uint16, i
 
 // put stores a DNS response in the cache. Only caches successful responses
 // (Rcode == 0) with at least one answer and a positive minimum TTL.
-func (qc *queryCache) put(msg *dns.Msg) {
+func (qc *queryCache) put(msg *dns.Msg, ecs string) {
 	if msg.Rcode != dns.RcodeSuccess {
 		return
 	}
@@ -161,6 +175,7 @@ func (qc *queryCache) put(msg *dns.Msg) {
 		Name:   toLowerASCII(question.Name),
 		Qtype:  question.Qtype,
 		Qclass: question.Qclass,
+		ECS:    ecs,
 	}
 
 	entry := &cacheEntry{

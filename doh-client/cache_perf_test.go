@@ -30,10 +30,10 @@ func buildTestResponse() *dns.Msg {
 func TestCacheGetFastPath(t *testing.T) {
 	cache := newQueryCache()
 	msg := buildTestResponse()
-	cache.put(msg)
+	cache.put(msg, "")
 
 	requestID := uint16(0xBBBB)
-	buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, requestID, true, dns.DefaultMsgSize)
+	buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, requestID, true, dns.DefaultMsgSize, "")
 	if !ok {
 		t.Fatal("cache get returned false (expected cache hit)")
 	}
@@ -56,7 +56,7 @@ func TestCacheGetFastPath(t *testing.T) {
 func TestCacheGetSlowPath(t *testing.T) {
 	cache := newQueryCache()
 	msg := buildTestResponse()
-	cache.put(msg)
+	cache.put(msg, "")
 
 	// Force the storedAt to 2 seconds ago so elapsedSec > 0
 	cache.mu.Lock()
@@ -67,7 +67,7 @@ func TestCacheGetSlowPath(t *testing.T) {
 	cache.mu.Unlock()
 
 	requestID := uint16(0xCCCC)
-	buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, requestID, true, dns.DefaultMsgSize)
+	buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, requestID, true, dns.DefaultMsgSize, "")
 	if !ok {
 		t.Fatal("cache get returned false (expected cache hit)")
 	}
@@ -94,12 +94,12 @@ func TestCacheGetSlowPath(t *testing.T) {
 func BenchmarkCacheGetSameSecond(b *testing.B) {
 	cache := newQueryCache()
 	msg := buildTestResponse()
-	cache.put(msg)
+	cache.put(msg, "")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		id := uint16(i & 0xFFFF)
-		buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, id, true, dns.DefaultMsgSize)
+		buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, id, true, dns.DefaultMsgSize, "")
 		if !ok || buf == nil || gotMsg == nil {
 			b.Fatal("unexpected cache miss")
 		}
@@ -109,7 +109,7 @@ func BenchmarkCacheGetSameSecond(b *testing.B) {
 func BenchmarkCacheGetElapsed(b *testing.B) {
 	cache := newQueryCache()
 	msg := buildTestResponse()
-	cache.put(msg)
+	cache.put(msg, "")
 
 	// Set storedAt to 2 seconds ago and clear packed to force slow path
 	cache.mu.Lock()
@@ -122,7 +122,7 @@ func BenchmarkCacheGetElapsed(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		id := uint16(i & 0xFFFF)
-		buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, id, true, dns.DefaultMsgSize)
+		buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, id, true, dns.DefaultMsgSize, "")
 		if !ok || buf == nil || gotMsg == nil {
 			b.Fatal("unexpected cache miss")
 		}

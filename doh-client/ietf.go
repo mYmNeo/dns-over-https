@@ -226,13 +226,11 @@ func (c *Client) parseResponseIETF(ctx context.Context, w dns.ResponseWriter, r 
 		_ = fixRecordTTL(rr, timeDelta)
 	}
 
-	if isTCP {
-		fullReply.Truncate(dns.MaxMsgSize)
-	} else {
-		fullReply.Truncate(int(req.udpSize))
-	}
+	// Truncate only a transport copy. Returning a Truncate()'d message would
+	// permanently drop RRs from cache/shm for later larger UDP/TCP clients.
+	wireReply := truncateForTransport(fullReply, isTCP, req.udpSize)
 	bufp := dnsBufferPool.Get().(*[]byte)
-	buf, err := fullReply.PackBuffer((*bufp)[:cap(*bufp)])
+	buf, err := wireReply.PackBuffer((*bufp)[:cap(*bufp)])
 	if err != nil {
 		dnsBufferPool.Put(bufp)
 		log.Printf("packing error with upstream %s: %v\n", req.currentUpstream, err)
