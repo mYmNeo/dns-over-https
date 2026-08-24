@@ -153,12 +153,13 @@ func (s *Server) Start() error {
 	s.servers = make([]*http.Server, 0, numServers)
 	for _, addr := range s.conf.Listen {
 		srv := &http.Server{
-			Addr:              addr,
-			Handler:           servemux,
-			ReadTimeout:       30 * time.Second,
-			ReadHeaderTimeout: 10 * time.Second,
-			WriteTimeout:      30 * time.Second,
-			IdleTimeout:       120 * time.Second,
+			Addr:                addr,
+			Handler:             servemux,
+			ReadTimeout:         30 * time.Second,
+			ReadHeaderTimeout:   10 * time.Second,
+			WriteTimeout:        30 * time.Second,
+			IdleTimeout:         120 * time.Second,
+			MaxHeaderValueCount: 100,
 		}
 		if s.conf.Cert != "" || s.conf.Key != "" {
 			tlsConfig := &tls.Config{

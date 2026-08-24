@@ -156,9 +156,9 @@ func marshalRR(rr dns.RR, now time.Time) RR {
 	// Format: "name\tTTL\tCLASS\tTYPE\tDATA" — DATA is the last field;
 	// miekg/dns escapes tabs in RDATA, so the last tab is the TYPE→DATA separator.
 	s := rr.String()
-	idx := strings.LastIndexByte(s, '\t')
-	if idx >= 0 {
-		jsonRR.Data = s[idx+1:]
+	_, data, found := strings.CutLast(s, "\t")
+	if found {
+		jsonRR.Data = data
 	}
 	return jsonRR
 }
