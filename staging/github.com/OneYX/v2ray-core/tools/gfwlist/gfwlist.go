@@ -2,6 +2,7 @@ package gfwlist
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 var GFWListURL = "https://gitlab.com/gfwlist/gfwlist/raw/master/gfwlist.txt"
@@ -199,44 +201,96 @@ func Parse(rules string) (*GFWList, error) {
 	return gfw, nil
 }
 
+const gfwlistHTTPTimeout = 30 * time.Second
+
+var gfwlistMaxBytes int64 = 16 << 20 // 16 MiB per source; overridable in tests
+
+
 func NewGFWList(urls []string, localFiles []string) (*GFWList, error) {
-	var readers []io.Reader
+	var parts []string
 
-	defer func() {
-		for _, reader := range readers {
-			if closer, ok := reader.(io.Closer); ok {
-				closer.Close()
-			}
-		}
-	}()
-
-	for _, url := range urls {
-		resp, err := http.Get(url)
+	client := &http.Client{Timeout: gfwlistHTTPTimeout}
+	for _, rawURL := range urls {
+		text, err := fetchGFWListURL(client, rawURL)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get gfwlist: %v", err)
+			return nil, err
 		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to get gfwlist: %v", resp.Status)
-		}
-
-		readers = append(readers, resp.Body)
+		parts = append(parts, text)
 	}
 
 	for _, localFile := range localFiles {
-		localReader, err := os.Open(localFile)
+		raw, err := os.ReadFile(localFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to write gfwlist to local file: %v", err)
+			return nil, fmt.Errorf("failed to read gfwlist local file %s: %w", localFile, err)
 		}
-
-		readers = append(readers, localReader)
+		parts = append(parts, decodeGFWListOrPlain(raw))
 	}
 
-	gfwListData, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, io.MultiReader(readers...)))
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("no gfwlist sources provided")
+	}
+	return Parse(strings.Join(parts, "\n"))
+}
+
+func fetchGFWListURL(client *http.Client, rawURL string) (string, error) {
+	resp, err := client.Get(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read gfwlist: %v", err)
+		return "", fmt.Errorf("failed to get gfwlist: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to get gfwlist: %v", resp.Status)
 	}
 
-	return Parse(string(gfwListData))
+	limited := io.LimitReader(resp.Body, int64(gfwlistMaxBytes)+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return "", fmt.Errorf("failed to read gfwlist body: %w", err)
+	}
+	if int64(len(raw)) > gfwlistMaxBytes {
+		return "", fmt.Errorf("gfwlist response exceeds %d bytes", gfwlistMaxBytes)
+	}
+
+	decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(raw)))
+	if err != nil {
+		return "", fmt.Errorf("failed to decode gfwlist: %w", err)
+	}
+	return string(decoded), nil
+}
+
+// decodeGFWListOrPlain accepts canonical base64 AutoProxy lists or plaintext
+// rule/domain lines (used by local blocklist files).
+func decodeGFWListOrPlain(raw []byte) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(string(trimmed))
+	if err == nil && looksLikeGFWList(decoded) {
+		return string(decoded)
+	}
+	// Also accept base64 with newlines via streaming decoder.
+	decoded, err = io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(trimmed)))
+	if err == nil && looksLikeGFWList(decoded) {
+		return string(decoded)
+	}
+	return string(raw)
+}
+
+func looksLikeGFWList(b []byte) bool {
+	s := string(b)
+	if strings.Contains(s, "[AutoProxy") {
+		return true
+	}
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "!") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		if strings.HasPrefix(line, "||") || strings.HasPrefix(line, "|") || strings.HasPrefix(line, "@@") || strings.HasPrefix(line, ".") || strings.HasPrefix(line, "/") {
+			return true
+		}
+	}
+	return false
 }

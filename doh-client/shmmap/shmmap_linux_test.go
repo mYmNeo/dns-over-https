@@ -217,6 +217,41 @@ func parseIP(s string) net.IP {
 	return net.ParseIP(s)
 }
 
+
+func TestShmPathRejectsTraversal(t *testing.T) {
+	for _, name := range []string{
+		"/../../tmp/evil",
+		"/../evil",
+		"/foo/bar",
+		"/.",
+		"/..",
+		"noleadingslash",
+		"/has space",
+		"/has:colon",
+		"",
+	} {
+		if _, err := shmPath(name); err == nil {
+			t.Errorf("shmPath(%q) = nil error, want rejection", name)
+		}
+	}
+}
+
+func TestShmPathAcceptsSimpleName(t *testing.T) {
+	path, err := shmPath("/doh-client-dns-map")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/dev/shm/doh-client-dns-map" {
+		t.Fatalf("path = %q", path)
+	}
+}
+
+func TestOpenRejectsTraversalName(t *testing.T) {
+	if _, err := Open("/../../tmp/doh-shm-evil", headerSize+slotSize*8); err == nil {
+		t.Fatal("Open with traversal name succeeded; want error")
+	}
+}
+
 func unixUnlink(name string) {
 	path, err := shmPath(name)
 	if err != nil {

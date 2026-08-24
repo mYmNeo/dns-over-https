@@ -119,6 +119,9 @@ func main() {
 		log.Fatalln(err)
 	}
 	if conf.PprofAddr != "" {
+		if err := validatePprofAddr(conf.PprofAddr); err != nil {
+			log.Fatalln(err)
+		}
 		server.SetPprofServer(&http.Server{
 			Addr:              conf.PprofAddr,
 			ReadHeaderTimeout: 5 * time.Second,

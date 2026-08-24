@@ -44,3 +44,16 @@ func sendErrorReply(w dns.ResponseWriter, r *dns.Msg, rcode int, err error) *DNS
 		err: err,
 	}
 }
+
+
+// truncateForTransport returns a copy of msg truncated for the client transport.
+// The input message is left intact so callers can cache/record the full answer.
+func truncateForTransport(msg *dns.Msg, isTCP bool, udpSize uint16) *dns.Msg {
+	out := msg.Copy()
+	if isTCP {
+		out.Truncate(dns.MaxMsgSize)
+	} else {
+		out.Truncate(int(udpSize))
+	}
+	return out
+}
