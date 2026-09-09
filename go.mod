@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/OneYX/v2ray-core v0.0.0
 	github.com/coreos/go-iptables v0.8.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gorilla/handlers v1.5.2
 	github.com/infobloxopen/go-trees v0.0.0-20221216143356-66ceba885ebc
 	github.com/miekg/dns v1.1.73
