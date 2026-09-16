@@ -88,7 +88,7 @@ func TestPutWithEmptyQuestion(t *testing.T) {
 	// Deliberately leave msg.Question empty
 
 	// This should not panic
-	cache.put(msg, "")
+	cache.put(msg, cacheRequest{})
 
 	// Verify cache is still empty (nothing was stored)
 	_, _, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, 0, true, 512, "")
@@ -114,7 +114,7 @@ func TestPutSuccessStoresAndReturns(t *testing.T) {
 	})
 	msg.SetRcode(msg, dns.RcodeSuccess)
 
-	cache.put(msg, "")
+	cache.put(msg, cacheRequest{})
 
 	_, _, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, 0, true, 512, "")
 	if !ok {
@@ -178,7 +178,7 @@ func TestCachePreservesAnswersForLargerClientAfterSmallPut(t *testing.T) {
 
 	// Correct path used by parseResponse*: put the untruncated message.
 	cache := newQueryCache()
-	cache.put(full, "")
+	cache.put(full, cacheRequest{})
 
 	_, msgTCP, ok := cache.get("large.example.", dns.TypeA, dns.ClassINET, 1, true, 512, "")
 	if !ok {
@@ -199,7 +199,7 @@ func TestCachePreservesAnswersForLargerClientAfterSmallPut(t *testing.T) {
 	// Document the old bug: putting an already-truncated msg permanently drops RRs.
 	buggyCache := newQueryCache()
 	buggy := truncateForTransport(full, false, 512)
-	buggyCache.put(buggy, "")
+	buggyCache.put(buggy, cacheRequest{})
 	_, buggyTCP, ok := buggyCache.get("large.example.", dns.TypeA, dns.ClassINET, 3, true, 4096, "")
 	if !ok {
 		// Truncated responses may lack answers enough / ttl — either miss or short answers.
@@ -227,7 +227,7 @@ func TestCacheECSIsolation(t *testing.T) {
 		t.Fatalf("bad ecs keys: %q %q", ecsA, ecsB)
 	}
 
-	cache.put(msg, ecsA)
+	cache.put(msg, cacheRequest{ECS: ecsA})
 
 	if _, _, ok := cache.get("geo.example.", dns.TypeA, dns.ClassINET, 1, true, 512, ecsA); !ok {
 		t.Fatal("expected hit for ecsA")

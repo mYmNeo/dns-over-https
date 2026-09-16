@@ -485,6 +485,9 @@ func (c *Client) Start() error {
 	c.cancel = cancel
 	c.selector.StartEvaluate(ctx)
 	c.cache.startCleanup(ctx)
+	// Refreshes run under the client's run context, not the request that
+	// triggered them: a refresh must outlive its trigger.
+	c.cache.setFetcher(ctx, time.Duration(c.conf.Other.Timeout)*time.Second, c.refreshCache)
 	if err := c.startListWatcher(ctx); err != nil {
 		log.Printf("Warning: failed to watch gfwlist/blocklist: %v\n", err)
 	}
@@ -568,7 +571,8 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 
 	// Check cache
 	udpSize := uint16(dns.DefaultMsgSize)
-	if opt := r.IsEdns0(); opt != nil {
+	var opt *dns.OPT
+	if opt = r.IsEdns0(); opt != nil {
 		udpSize = opt.UDPSize()
 	}
 	ednsAddr, ednsMask := c.findClientIP(w, r)
@@ -591,101 +595,49 @@ func (c *Client) handlerFunc(w dns.ResponseWriter, r *dns.Msg, isTCP bool) {
 			return
 		}
 	}
-	upstream := c.selector.Get()
-	if upstream == nil {
-		log.Printf("No upstream available for %s", questionName)
-		reply := jsondns.PrepareReply(r)
-		reply.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(reply)
-		return
+
+	// The miss is resolved through the cache, which coalesces this request with
+	// any other client or background refresh waiting on the same key: one
+	// upstream query serves them all.
+	key := cacheKey{
+		Name:   questionName,
+		Qtype:  question.Qtype,
+		Qclass: question.Qclass,
+		ECS:    ecsKey,
 	}
-	requestType := upstream.RequestType
-
-	if c.conf.Other.Verbose {
-		log.Println("choose upstream:", upstream)
+	cacheReq := cacheRequest{
+		ECS:     ecsKey,
+		UDPSize: udpSize,
+		CD:      r.CheckingDisabled,
 	}
-
-	var req *DNSRequest
-	switch requestType {
-	case "application/dns-json":
-		req = c.generateRequestGoogle(ctx, w, r, isTCP, upstream)
-
-	case "application/dns-message":
-		req = c.generateRequestIETF(ctx, w, r, isTCP, upstream)
-
-	default:
-		panic("Unknown request Content-Type")
+	if opt != nil {
+		cacheReq.DO = opt.Do()
 	}
-
-	if req.err != nil {
-		if urlErr, ok := req.err.(*url.Error); ok {
-			// should we only check timeout?
-			if urlErr.Timeout() {
-				c.selector.ReportUpstreamStatus(upstream, selector.Timeout)
-			}
-		}
-
+	fullReply, err := c.cache.fetch(ctx, key, cacheReq)
+	if err != nil || fullReply == nil {
+		// refreshCache resolves into a void sink, so the failure must be
+		// reported here.
+		sendErrorReply(w, r, dns.RcodeServerFailure, err)
 		return
 	}
 
-	// if req.err == nil, req.response != nil
+	// AddGFWFilterIP and recordResponse are the resolver's responsibility now:
+	// the reply may come from a background refresh shared with other waiters,
+	// so doing either here would double-count.
 
-	for _, header := range c.conf.Other.DebugHTTPHeaders {
-		if value := req.response.Header.Get(header); value != "" {
-			log.Printf("%s: %s\n", header, value)
-		}
+	// Reply from a transport copy only. fullReply is shared with every other
+	// waiter on this key and with the cached entry.
+	wireReply := truncateForTransport(fullReply, isTCP, udpSize)
+	wireReply.Id = r.Id
+	bufp := dnsBufferPool.Get().(*[]byte)
+	buf, packErr := wireReply.PackBuffer((*bufp)[:cap(*bufp)])
+	if packErr != nil {
+		dnsBufferPool.Put(bufp)
+		sendErrorReply(w, r, dns.RcodeServerFailure, packErr)
+		return
 	}
-
-	candidateType := req.response.Header.Get("Content-Type")
-	if idx := strings.IndexByte(candidateType, ';'); idx >= 0 {
-		candidateType = candidateType[:idx]
-	}
-
-	var fullReply *dns.Msg
-	switch candidateType {
-	case "application/json":
-		fullReply = c.parseResponseGoogle(ctx, w, r, isTCP, req)
-
-	case "application/dns-message", "application/dns-udpwireformat":
-		fullReply = c.parseResponseIETF(ctx, w, r, isTCP, req)
-
-	default:
-		switch requestType {
-		case "application/dns-json":
-			fullReply = c.parseResponseGoogle(ctx, w, r, isTCP, req)
-
-		case "application/dns-message":
-			fullReply = c.parseResponseIETF(ctx, w, r, isTCP, req)
-
-		default:
-			panic("Unknown response Content-Type")
-		}
-	}
-
-	if gfwBlocked && fullReply != nil {
-		log.Println("GFW blocked:", questionName)
-		c.AddGFWFilterIP(fullReply.Answer)
-	}
-
-	if fullReply != nil {
-		c.cache.put(fullReply, ecsKey)
-		c.recordResponse(fullReply)
-	}
-
-	// https://developers.cloudflare.com/1.1.1.1/dns-over-https/request-structure/ says
-	// returns code will be 200 / 400 / 413 / 415 / 504, some server will return 503, so
-	// I think if status code is 5xx, upstream must have some problems
-	/*if req.response.StatusCode/100 == 5 {
-		c.selector.ReportUpstreamStatus(upstream, selector.Medium)
-	}*/
-
-	switch req.response.StatusCode / 100 {
-	case 5:
-		c.selector.ReportUpstreamStatus(upstream, selector.Error)
-
-	case 2:
-		c.selector.ReportUpstreamStatus(upstream, selector.OK)
-	}
+	w.Write(buf)
+	dnsBufferPool.Put(bufp)
 }
 
 func (c *Client) udpHandlerFunc(w dns.ResponseWriter, r *dns.Msg) {
@@ -694,6 +646,127 @@ func (c *Client) udpHandlerFunc(w dns.ResponseWriter, r *dns.Msg) {
 
 func (c *Client) tcpHandlerFunc(w dns.ResponseWriter, r *dns.Msg) {
 	c.handlerFunc(w, r, true)
+}
+
+// refreshCache re-resolves a cache key upstream on behalf of the cache. It runs
+// the exact protocol path a client-driven query runs, minus the client: the
+// reply is parsed into the void sink, so a coalesced background refresh and a
+// client-driven miss produce byte-identical cached answers.
+func (c *Client) refreshCache(ctx context.Context, key cacheKey, req cacheRequest) (*dns.Msg, error) {
+	isBlocked, gfwBlocked, _ := c.checkLists(key.Name)
+	if isBlocked {
+		return nil, fmt.Errorf("refuse to refresh blocked domain %q", key.Name)
+	}
+	upstream := c.selector.Get()
+	if upstream == nil {
+		return nil, fmt.Errorf("no upstream available for %s", key.Name)
+	}
+	if c.conf.Other.Verbose {
+		log.Printf("cache refresh: %s %s, choose upstream: %s\n", key.Name, jsondns.TypeToString(key.Qtype), upstream)
+	}
+
+	// Rebuild the query the cache key was derived from, ECS included, so the
+	// refresh addresses the same dimension the entry was stored under.
+	r := new(dns.Msg)
+	r.SetQuestion(key.Name, key.Qtype)
+	r.Question[0].Qclass = key.Qclass
+	r.CheckingDisabled = req.CD
+	opt := jsondns.NewOPTRecord(dns.DefaultMsgSize, false)
+	if req.UDPSize >= dns.DefaultMsgSize {
+		opt.SetUDPSize(req.UDPSize)
+	}
+	if req.DO {
+		opt.SetDo()
+	}
+	if edns0Subnet := ednsSubnetFromCacheKey(key.ECS); edns0Subnet != nil {
+		opt.Option = append(opt.Option, edns0Subnet)
+	}
+	r.Extra = append(r.Extra, opt)
+
+	sink := voidResponseWriter{}
+	var dreq *DNSRequest
+	switch upstream.RequestType {
+	case "application/dns-json":
+		dreq = c.generateRequestGoogle(ctx, sink, r, true, upstream)
+
+	case "application/dns-message":
+		dreq = c.generateRequestIETF(ctx, sink, r, true, upstream)
+
+	default:
+		panic("Unknown request Content-Type")
+	}
+
+	if dreq.err != nil {
+		if urlErr, ok := dreq.err.(*url.Error); ok {
+			// should we only check timeout?
+			if urlErr.Timeout() {
+				c.selector.ReportUpstreamStatus(upstream, selector.Timeout)
+			}
+		}
+
+		return nil, dreq.err
+	}
+
+	// if dreq.err == nil, dreq.response != nil
+
+	for _, header := range c.conf.Other.DebugHTTPHeaders {
+		if value := dreq.response.Header.Get(header); value != "" {
+			log.Printf("%s: %s\n", header, value)
+		}
+	}
+
+	candidateType := dreq.response.Header.Get("Content-Type")
+	if idx := strings.IndexByte(candidateType, ';'); idx >= 0 {
+		candidateType = candidateType[:idx]
+	}
+
+	var fullReply *dns.Msg
+	switch candidateType {
+	case "application/json":
+		fullReply = c.parseResponseGoogle(ctx, sink, r, true, dreq)
+
+	case "application/dns-message", "application/dns-udpwireformat":
+		fullReply = c.parseResponseIETF(ctx, sink, r, true, dreq)
+
+	default:
+		switch upstream.RequestType {
+		case "application/dns-json":
+			fullReply = c.parseResponseGoogle(ctx, sink, r, true, dreq)
+
+		case "application/dns-message":
+			fullReply = c.parseResponseIETF(ctx, sink, r, true, dreq)
+
+		default:
+			return nil, fmt.Errorf("unknown response Content-Type %q", candidateType)
+		}
+	}
+
+	// https://developers.cloudflare.com/1.1.1.1/dns-over-https/request-structure/ says
+	// returns code will be 200 / 400 / 413 / 415 / 504, some server will return 503, so
+	// I think if status code is 5xx, upstream must have some problems
+	/*if dreq.response.StatusCode/100 == 5 {
+		c.selector.ReportUpstreamStatus(upstream, selector.Medium)
+	}*/
+
+	switch dreq.response.StatusCode / 100 {
+	case 5:
+		c.selector.ReportUpstreamStatus(upstream, selector.Error)
+
+	case 2:
+		c.selector.ReportUpstreamStatus(upstream, selector.OK)
+	}
+
+	if fullReply == nil {
+		return nil, fmt.Errorf("upstream %s returned no usable reply for %s", upstream.URL, key.Name)
+	}
+
+	if gfwBlocked {
+		log.Println("GFW blocked:", key.Name)
+		c.AddGFWFilterIP(fullReply.Answer)
+	}
+
+	c.recordResponse(fullReply)
+	return fullReply, nil
 }
 
 func (c *Client) recordResponse(msg *dns.Msg) {
@@ -729,6 +802,35 @@ func (c *Client) findClientIP(w dns.ResponseWriter, r *dns.Msg) (ednsClientAddre
 		}
 	}
 	return
+}
+
+// ednsSubnetFromCacheKey rebuilds the EDNS0 Client Subnet option that an
+// ecsCacheKey string ("203.0.113.0/24") was derived from, so a refresh replays
+// the exact ECS dimension its entry is keyed under.
+// The address and the mask both come from this one CIDR: deriving the mask from
+// GetEDNSClientInfo instead would widen a precise /32 or /128 key to a coarse
+// subnet and send the upstream an ECS the cached answer does not describe.
+func ednsSubnetFromCacheKey(ecs string) *dns.EDNS0_SUBNET {
+	if ecs == "" {
+		return nil
+	}
+	_, ipnet, err := net.ParseCIDR(ecs)
+	if err != nil {
+		return nil
+	}
+	ones, bits := ipnet.Mask.Size()
+	if ones == 0 {
+		return nil
+	}
+	addr := ipnet.IP // already masked to the network, correct byte length
+	if bits == 32 {
+		addr = addr.To4()
+		if addr == nil {
+			return nil
+		}
+		return jsondns.NewEDNS0Subnet(1, uint8(ones), addr)
+	}
+	return jsondns.NewEDNS0Subnet(2, uint8(ones), addr)
 }
 
 // getInterfaceIPs returns the first valid IPv4 and IPv6 addresses found on the interface
