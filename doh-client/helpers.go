@@ -25,6 +25,7 @@ package main
 
 import (
 	"log"
+	"net"
 
 	"github.com/miekg/dns"
 
@@ -57,3 +58,25 @@ func truncateForTransport(msg *dns.Msg, isTCP bool, udpSize uint16) *dns.Msg {
 	}
 	return out
 }
+
+// voidResponseWriter is a dns.ResponseWriter that discards everything written
+// to it. The cache refresh path reuses generateRequest*/parseResponse* so that a
+// refreshed answer is obtained by exactly the same protocol logic as a
+// client-driven query; those helpers write their reply through the
+// ResponseWriter, and a refresh must not write to any real client.
+type voidResponseWriter struct{}
+
+func (voidResponseWriter) LocalAddr() net.Addr  { return nil }
+func (voidResponseWriter) RemoteAddr() net.Addr { return nil }
+
+func (voidResponseWriter) WriteMsg(*dns.Msg) error { return nil }
+
+func (voidResponseWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func (voidResponseWriter) Close() error { return nil }
+
+func (voidResponseWriter) TsigStatus() error { return nil }
+
+func (voidResponseWriter) TsigTimersOnly(bool) {}
+
+func (voidResponseWriter) Hijack() {}

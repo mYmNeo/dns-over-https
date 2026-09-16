@@ -30,7 +30,7 @@ func buildTestResponse() *dns.Msg {
 func TestCacheGetFastPath(t *testing.T) {
 	cache := newQueryCache()
 	msg := buildTestResponse()
-	cache.put(msg, "")
+	cache.put(msg, cacheRequest{})
 
 	requestID := uint16(0xBBBB)
 	buf, gotMsg, ok := cache.get("example.com.", dns.TypeA, dns.ClassINET, requestID, true, dns.DefaultMsgSize, "")
@@ -56,7 +56,7 @@ func TestCacheGetFastPath(t *testing.T) {
 func TestCacheGetSlowPath(t *testing.T) {
 	cache := newQueryCache()
 	msg := buildTestResponse()
-	cache.put(msg, "")
+	cache.put(msg, cacheRequest{})
 
 	// Force the storedAt to 2 seconds ago so elapsedSec > 0
 	cache.mu.Lock()
@@ -94,7 +94,7 @@ func TestCacheGetSlowPath(t *testing.T) {
 func BenchmarkCacheGetSameSecond(b *testing.B) {
 	cache := newQueryCache()
 	msg := buildTestResponse()
-	cache.put(msg, "")
+	cache.put(msg, cacheRequest{})
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -109,7 +109,7 @@ func BenchmarkCacheGetSameSecond(b *testing.B) {
 func BenchmarkCacheGetElapsed(b *testing.B) {
 	cache := newQueryCache()
 	msg := buildTestResponse()
-	cache.put(msg, "")
+	cache.put(msg, cacheRequest{})
 
 	// Set storedAt to 2 seconds ago and clear packed to force slow path
 	cache.mu.Lock()

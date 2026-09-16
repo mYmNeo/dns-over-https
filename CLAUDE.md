@@ -52,7 +52,7 @@ golangci-lint run ./...               # Lint (see .golangci.yml)
 ├─────────────────────────────────────────────────────────┤
 │ Listens on UDP/TCP (default 127.0.0.1:53)              │
 │ • Forwards queries to upstream DoH servers              │
-│ • Query result caching (10k entries max, LRU-ish)       │
+│ • Query result caching (10k entries, coalesced refresh) │
 │ • GFW blocking + ipset filtering (Linux)                │
 │ • Upstream selector with health checking                │
 │ • IPv4/IPv6 support, EDNS0-Client-Subnet               │
@@ -87,7 +87,7 @@ golangci-lint run ./...               # Lint (see .golangci.yml)
 |------|---------|
 | `main.go` | Entry point, CLI flags, signal handling, PID file management |
 | `client.go` | Core `Client` struct; DNS handler dispatch; GFW/iptables setup |
-| `cache.go` | Query result caching (TTL-aware, background cleanup) |
+| `cache.go` | Query result caching (TTL-aware, coalesced refresh, background cleanup) |
 | `config/config.go` | TOML config parsing; upstream selector modes |
 | `selector/` | Upstream selection strategies & health checking |
 | `google.go`, `ietf.go` | Request/response handling per protocol format |
@@ -185,12 +185,24 @@ golangci-lint run ./...               # Lint (see .golangci.yml)
 **Operations:**
 - `get()` — Checks expiry, adjusts TTLs downward by elapsed time, clones message, truncates for UDP, repacks wire format
 - `put()` — Only caches successful responses (Rcode==0) with ≥1 answer and minTTL > 0
+- `fetch()` — Coalesced upstream lookup; concurrent callers for one key share a single in-flight query
 - `startCleanup()` — Background goroutine runs every 60 seconds to remove expired entries
 - **Thread-safety:** Uses `sync.RWMutex` for all cache operations
 
-**Expiry Logic:**
+**Expiry & Refresh Logic:**
 - Entry expires when `now - storedAt >= ttl`
+- An expired entry is NEVER served: `get()` deletes it and returns a miss, exactly as before
+- Expiry schedules a coalesced background refresh so the entry repopulates without waiting for the next client query
 - Clean-up collects expired keys under read lock, then deletes under write lock (avoiding lock contention)
+
+**Cache-Initiated Refresh:**
+Refreshing must not double the upstream load, so the cache owns a per-key in-flight map rather than firing a query per expired lookup:
+
+- `setFetcher(ctx, timeout, fn)` installs the resolver; the `ctx` is the client's long-lived run context so a refresh outlives the request that triggered it
+- `fetch()` is the single entry point for both the request handler's miss path and background refreshes. The first caller becomes the leader and runs the query in a detached goroutine (surviving its caller); the rest block on the shared result or their own context
+- `scheduleRefresh()` is called by `get()` on expiry with no lock held, is non-blocking, and returns immediately when no fetcher is installed or the bounded refresh semaphore is exhausted
+- `Client.refreshCache` implements `cacheFetcher`, reusing `generateRequest*`/`parseResponse*` with a `voidResponseWriter` sink, so a refreshed answer comes from the same protocol logic as a live query without writing to any client
+- The refresh replays the original ECS dimension and the `DO`/`CD` flags, and re-runs GFW ipset insertion and shm recording, since it — not the handler — owns those side effects now
 
 ---
 
