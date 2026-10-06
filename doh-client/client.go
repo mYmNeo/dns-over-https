@@ -310,10 +310,12 @@ func NewClient(conf *config.Config) (c *Client, err error) {
 	if c.conf.Other.LocalInterfaceName != "" {
 		if err := c.PrepareDNSRules(); err != nil {
 			log.Printf("Warning: failed to prepare DNS rules: %v\n", err)
+			return nil, fmt.Errorf("failed to prepare DNS rules")
 		}
 		if c.conf.Other.GFWListURL != nil || c.conf.Other.GFWList != nil {
 			if err := c.PrepareGFWListIPSet(); err != nil {
 				log.Printf("Warning: failed to prepare GFW ipset: %v\n", err)
+				return nil, fmt.Errorf("failed to prepare GFW ipset")
 			}
 		}
 	}
